@@ -5,6 +5,8 @@ A Windows desktop editor for BlueStacks 5 `.cfg` game-control mapping files.
 > WARNING!! 
 > Editing a live BlueStacks configuration can break a control scheme. Keep a known-good copy of important configurations.
 
+<img src="./img/screenshot.png" alt="drawing" width="500"/>
+
 ## Features
 
 - Opens BlueStacks `.cfg` files and JSON files
@@ -33,10 +35,10 @@ dotnet run --project BluestacksCfgEditor.csproj
 To create a release build:
 
 ```powershell
-dotnet build BluestacksCfgEditor.slnx --configuration Release
+dotnet publish BluestacksCfgEditor.slnx --configuration Release
 ```
 
-The build output is written to `bin/Release/net10.0-windows/`.
+The release output is written to `bin/Release/net10.0-windows/win-x64/publish/` and produces a self-contained single-file executable.
 
 ## Usage
 

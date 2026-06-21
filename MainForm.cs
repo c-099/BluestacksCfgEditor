@@ -28,13 +28,15 @@ internal sealed class MainForm : Form
     private int _selectedSchemeIndex;
     private int _selectedControlIndex;
     private bool _isLoadingUi;
+    private bool _isClosing;
     private RectangleF _previewBounds;
 
     internal MainForm()
     {
         InitializeComponent();
+        FormClosing += (_, _) => _isClosing = true;
         BuildFieldTables();
-        UpdateLivePathStatus();
+        TryUpdateLivePathStatus();
         LoadEmptyState();
     }
 
@@ -44,16 +46,17 @@ internal sealed class MainForm : Form
 
         Text = "BlueStacks CFG Editor";
         StartPosition = FormStartPosition.CenterScreen;
-        MinimumSize = new Size(1200, 780);
-        ClientSize = new Size(1400, 900);
+        MinimumSize = new Size(1000, 780);
+        ClientSize = new Size(1200, 900);
 
         TableLayoutPanel root = new()
         {
             Dock = DockStyle.Fill,
             ColumnCount = 1,
-            RowCount = 2,
+            RowCount = 3,
             Padding = new Padding(10),
         };
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
         root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
         Controls.Add(root);
@@ -93,31 +96,40 @@ internal sealed class MainForm : Form
         _packageComboBox.Text = _packageComboBox.Items.Count > 0
             ? _packageComboBox.Items[0]?.ToString() ?? string.Empty
             : ConfigDefinitions.DefaultPackage;
-        _packageComboBox.SelectionChangeCommitted += (_, _) => UpdateLivePathStatus();
-        _packageComboBox.Leave += (_, _) => UpdateLivePathStatus();
+        _packageComboBox.SelectionChangeCommitted += (_, _) => TryUpdateLivePathStatus();
+        _packageComboBox.Leave += (_, _) =>
+        {
+            if (!_isClosing)
+            {
+                TryUpdateLivePathStatus();
+            }
+        };
         _packageComboBox.KeyDown += (_, e) =>
         {
             if (e.KeyCode == Keys.Enter)
             {
                 e.SuppressKeyPress = true;
-                UpdateLivePathStatus();
+                TryUpdateLivePathStatus();
             }
         };
         toolbar.Controls.Add(_packageComboBox);
         toolbar.Controls.Add(openLiveButton);
         toolbar.Controls.Add(saveToLiveButton);
 
-        _statusLabel.AutoSize = true;
-        _statusLabel.Margin = new Padding(16, 8, 0, 0);
+        _statusLabel.AutoSize = false;
+        _statusLabel.Dock = DockStyle.Fill;
+        _statusLabel.TextAlign = ContentAlignment.MiddleLeft;
+        _statusLabel.AutoEllipsis = true;
+        _statusLabel.Margin = new Padding(0, 6, 0, 6);
         _statusLabel.Text = "Open a .cfg or .json file to begin";
-        toolbar.Controls.Add(_statusLabel);
+        root.Controls.Add(_statusLabel, 0, 1);
 
         SplitContainer bodySplit = new()
         {
             Dock = DockStyle.Fill,
             Orientation = Orientation.Vertical,
         };
-        root.Controls.Add(bodySplit, 0, 1);
+        root.Controls.Add(bodySplit, 0, 2);
 
         TableLayoutPanel sidebar = new()
         {
@@ -219,7 +231,7 @@ internal sealed class MainForm : Form
         advancedLayout.Controls.Add(_advancedJsonTextBox, 0, 0);
         _applyAdvancedJsonButton.Text = "Apply JSON To Selected Control";
         _applyAdvancedJsonButton.AutoSize = true;
-        _applyAdvancedJsonButton.Anchor = AnchorStyles.Right;
+        _applyAdvancedJsonButton.Anchor = AnchorStyles.Left;
         _applyAdvancedJsonButton.Click += (_, _) => RunUiAction(ApplyAdvancedJson, "Advanced JSON Failed");
         advancedLayout.Controls.Add(_applyAdvancedJsonButton, 0, 1);
         advancedTab.Controls.Add(advancedLayout);
@@ -227,11 +239,7 @@ internal sealed class MainForm : Form
 
         ResumeLayout(performLayout: true);
 
-        // SplitContainer validates these values against its current width.
-        // Apply them only after the docked layout has assigned its final size.
-        bodySplit.SplitterDistance = 360;
-        bodySplit.Panel1MinSize = 320;
-        bodySplit.Panel2MinSize = 700;
+        Shown += (_, _) => BeginInvoke(() => ConfigureInitialSplitterLayout(bodySplit));
     }
 
     private static Button CreateToolbarButton(string text, EventHandler onClick) =>
@@ -276,7 +284,7 @@ internal sealed class MainForm : Form
     private void BuildFieldTables()
     {
         ConfigureFieldTable(_commonFieldsTable);
-        PopulateFieldTable(_commonFieldsTable, ConfigDefinitions.CommonFields, _commonEditors);
+        PopulateFieldTable(_commonFieldsTable, ConfigDefinitions.CommonFields, _commonEditors, rightAlignLabels: true);
 
         ConfigureFieldTable(_typeFieldsTable);
     }
@@ -297,7 +305,8 @@ internal sealed class MainForm : Form
     private void PopulateFieldTable(
         TableLayoutPanel table,
         IReadOnlyList<FieldDefinition> definitions,
-        Dictionary<string, FieldEditor> editors)
+        Dictionary<string, FieldEditor> editors,
+        bool rightAlignLabels = false)
     {
         Dictionary<string, FieldDefinition> definitionsByName =
             definitions.ToDictionary(definition => definition.Name, StringComparer.Ordinal);
@@ -316,12 +325,12 @@ internal sealed class MainForm : Form
                 && definitionsByName.TryGetValue(yCounterpartName, out FieldDefinition? yDefinition)
                 && added.Add(yDefinition.Name))
             {
-                editors[definition.Name] = AddFieldEditor(table, definition, CommitStandardField, row, 0, 1);
-                editors[yDefinition.Name] = AddFieldEditor(table, yDefinition, CommitStandardField, row, 2, 3);
+                editors[definition.Name] = AddFieldEditor(table, definition, CommitStandardField, row, 0, 1, rightAlignLabels);
+                editors[yDefinition.Name] = AddFieldEditor(table, yDefinition, CommitStandardField, row, 2, 3, rightAlignLabels);
             }
             else
             {
-                editors[definition.Name] = AddFieldEditor(table, definition, CommitStandardField, row, 0, 1, 3);
+                editors[definition.Name] = AddFieldEditor(table, definition, CommitStandardField, row, 0, 1, rightAlignLabels, 3);
             }
         }
     }
@@ -348,6 +357,7 @@ internal sealed class MainForm : Form
         int row,
         int labelColumn,
         int editorColumn,
+        bool rightAlignLabel = false,
         int editorColumnSpan = 1)
     {
 
@@ -355,7 +365,8 @@ internal sealed class MainForm : Form
         {
             Text = definition.Name,
             AutoSize = true,
-            Anchor = AnchorStyles.Left,
+            Anchor = rightAlignLabel ? AnchorStyles.Right : AnchorStyles.Left,
+            TextAlign = rightAlignLabel ? ContentAlignment.MiddleRight : ContentAlignment.MiddleLeft,
             Margin = new Padding(0, 8, 8, 0),
         };
         table.Controls.Add(label, labelColumn, row);
@@ -745,14 +756,14 @@ internal sealed class MainForm : Form
         }
 
         _typeInfoLabel.Text = $"Editing fields for {controlType}";
-        PopulateFieldTable(_typeFieldsTable, definitions, _typeEditors);
+        PopulateFieldTable(_typeFieldsTable, definitions, _typeEditors, rightAlignLabels: true);
 
         _typeFieldsTable.ResumeLayout(performLayout: true);
     }
 
     private void CommitStandardField(FieldEditor editor)
     {
-        if (_isLoadingUi)
+        if (_isLoadingUi || _isClosing)
         {
             return;
         }
@@ -895,7 +906,7 @@ internal sealed class MainForm : Form
 
     private void OnSchemeSelectionChanged()
     {
-        if (_isLoadingUi || _schemeListBox.SelectedIndex < 0)
+        if (_isLoadingUi || _isClosing || _schemeListBox.SelectedIndex < 0)
         {
             return;
         }
@@ -909,7 +920,7 @@ internal sealed class MainForm : Form
 
     private void OnControlSelectionChanged()
     {
-        if (_isLoadingUi || _controlListBox.SelectedIndex < 0)
+        if (_isLoadingUi || _isClosing || _controlListBox.SelectedIndex < 0)
         {
             return;
         }
@@ -977,6 +988,25 @@ internal sealed class MainForm : Form
         string livePath = ConfigService.GetLiveConfigPath(_packageComboBox.Text.Trim());
         SetStatus(File.Exists(livePath) ? $"Live config: {livePath}" : $"Live config not found: {livePath}");
         return livePath;
+    }
+
+    private bool TryUpdateLivePathStatus()
+    {
+        if (_isClosing || IsDisposed || Disposing)
+        {
+            return false;
+        }
+
+        try
+        {
+            UpdateLivePathStatus();
+            return true;
+        }
+        catch (ArgumentException)
+        {
+            SetStatus("Enter a package name to use live config features");
+            return false;
+        }
     }
 
     private void SetStatus(string text) => _statusLabel.Text = text;
@@ -1109,7 +1139,7 @@ internal sealed class MainForm : Form
 
     private void OnPreviewClicked(Point location)
     {
-        if (_previewMarkers.Count == 0)
+        if (_isClosing || _previewMarkers.Count == 0)
         {
             return;
         }
@@ -1132,6 +1162,11 @@ internal sealed class MainForm : Form
 
     private void RunUiAction(Action action, string title)
     {
+        if (_isClosing)
+        {
+            return;
+        }
+
         try
         {
             action();
@@ -1160,6 +1195,29 @@ internal sealed class MainForm : Form
         float dx = point.X - centerX;
         float dy = point.Y - centerY;
         return (dx * dx) + (dy * dy);
+    }
+
+    private static void ConfigureInitialSplitterLayout(SplitContainer splitContainer)
+    {
+        if (!splitContainer.IsHandleCreated || splitContainer.Width <= 0)
+        {
+            return;
+        }
+
+        const int preferredPanel1 = 360;
+        const int panel1Min = 320;
+        const int panel2Min = 550;
+
+        splitContainer.Panel1MinSize = panel1Min;
+        splitContainer.Panel2MinSize = panel2Min;
+
+        int maxPanel1 = splitContainer.Width - panel2Min;
+        if (maxPanel1 < panel1Min)
+        {
+            return;
+        }
+
+        splitContainer.SplitterDistance = Math.Clamp(preferredPanel1, panel1Min, maxPanel1);
     }
 }
 
