@@ -1,8 +1,8 @@
 # BlueStacks CFG Editor
 
-A Windows desktop editor for BlueStacks 5 keyboard and game-control mapping files.
+A Windows desktop editor for BlueStacks 5 `.cfg` game-control mapping files.
 
-> WARNING
+> WARNING!! 
 > Editing a live BlueStacks configuration can break a control scheme. Keep a known-good copy of important configurations.
 
 ## Features
@@ -69,3 +69,9 @@ When replacing an existing live file, the editor creates a backup beside it usin
 - The editor currently exposes dedicated fields for a subset of BlueStacks control types. Other controls remain editable through the Advanced JSON tab.
 - BlueStacks configuration formats are not officially documented and may change between releases.
 - This project is not affiliated with or endorsed by BlueStacks.
+##
+To support my projects:
+<br>
+<a href="https://www.buymeacoffee.com/ninenines" target="_blank"><img src="https://cdn.buymeacoffee.com/buttons/v2/default-red.png" alt="Buy Me a Coffee" style="height: 40px !important;width: 145px !important;" ></a>
+<br>
+Join my discord for help, questions or suggestions: [discord.gg/mDx55QKT3s](https://discord.gg/mDx55QKT3s)
