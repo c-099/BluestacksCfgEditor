@@ -1,0 +1,45 @@
+# Build output
+[Bb]in/
+[Oo]bj/
+[Aa]rtifacts/
+
+# Visual Studio
+.vs/
+*.suo
+*.user
+*.rsuser
+*.userosscache
+*.sln.docstates
+
+# Visual Studio Code
+.vscode/
+
+# JetBrains IDEs
+.idea/
+*.sln.iml
+
+# Test and coverage output
+TestResults/
+coverage/
+coverage.*
+*.coverage
+*.coveragexml
+
+# NuGet
+*.nupkg
+*.snupkg
+packages/
+
+# Publish output
+publish/
+
+# Logs and temporary files
+*.log
+*.tmp
+*.bak
+*.bak.*
+
+# Operating system files
+.DS_Store
+Thumbs.db
+Desktop.ini

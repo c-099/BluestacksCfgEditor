@@ -793,58 +793,58 @@ internal sealed class MainForm : Form
                 value = JsonValue.Create(checkBox.Checked);
                 return true;
             case TextBox textBox when editor.Definition.Kind == FieldKind.Int:
-            {
-                string text = textBox.Text.Trim();
-                if (text.Length == 0)
                 {
-                    value = JsonValue.Create(0);
-                    return true;
-                }
-
-                if (ConfigService.TryParseInteger(text, out int parsed))
-                {
-                    value = JsonValue.Create(parsed);
-                    return true;
-                }
-
-                value = null;
-                errorMessage = $"{editor.Definition.Name} must be an integer.";
-                return false;
-            }
-            case TextBox textBox when editor.Definition.Kind == FieldKind.Float:
-            {
-                string text = textBox.Text.Trim();
-                if (text.Length == 0)
-                {
-                    value = JsonValue.Create(0d);
-                    return true;
-                }
-
-                if (ConfigService.TryParseDouble(text, out double parsed))
-                {
-                    value = JsonValue.Create(parsed);
-                    return true;
-                }
-
-                value = null;
-                errorMessage = $"{editor.Definition.Name} must be a number using invariant formatting.";
-                return false;
-            }
-            case TextBox textBox when editor.Definition.Kind == FieldKind.StringList:
-            {
-                JsonArray array = [];
-                string normalized = textBox.Text.Replace("\r\n", "\n", StringComparison.Ordinal);
-                if (normalized.Length > 0)
-                {
-                    foreach (string line in normalized.Split('\n'))
+                    string text = textBox.Text.Trim();
+                    if (text.Length == 0)
                     {
-                        array.Add(line);
+                        value = JsonValue.Create(0);
+                        return true;
                     }
-                }
 
-                value = array;
-                return true;
-            }
+                    if (ConfigService.TryParseInteger(text, out int parsed))
+                    {
+                        value = JsonValue.Create(parsed);
+                        return true;
+                    }
+
+                    value = null;
+                    errorMessage = $"{editor.Definition.Name} must be an integer.";
+                    return false;
+                }
+            case TextBox textBox when editor.Definition.Kind == FieldKind.Float:
+                {
+                    string text = textBox.Text.Trim();
+                    if (text.Length == 0)
+                    {
+                        value = JsonValue.Create(0d);
+                        return true;
+                    }
+
+                    if (ConfigService.TryParseDouble(text, out double parsed))
+                    {
+                        value = JsonValue.Create(parsed);
+                        return true;
+                    }
+
+                    value = null;
+                    errorMessage = $"{editor.Definition.Name} must be a number using invariant formatting.";
+                    return false;
+                }
+            case TextBox textBox when editor.Definition.Kind == FieldKind.StringList:
+                {
+                    JsonArray array = [];
+                    string normalized = textBox.Text.Replace("\r\n", "\n", StringComparison.Ordinal);
+                    if (normalized.Length > 0)
+                    {
+                        foreach (string line in normalized.Split('\n'))
+                        {
+                            array.Add(line);
+                        }
+                    }
+
+                    value = array;
+                    return true;
+                }
             case TextBox textBox:
                 value = JsonValue.Create(textBox.Text);
                 return true;
