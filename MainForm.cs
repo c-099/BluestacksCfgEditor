@@ -1,0 +1,1177 @@
+using System.Drawing.Drawing2D;
+using System.Globalization;
+using System.Text.Json;
+using System.Text.Json.Nodes;
+
+namespace BluestacksCfgEditor;
+
+internal sealed class MainForm : Form
+{
+    private readonly ComboBox _packageComboBox = new();
+    private readonly Label _statusLabel = new();
+    private readonly ListBox _schemeListBox = new();
+    private readonly ListBox _controlListBox = new();
+    private readonly Panel _previewPanel = new();
+    private readonly Label _schemeSummaryLabel = new();
+    private readonly Label _controlTitleLabel = new();
+    private readonly TableLayoutPanel _commonFieldsTable = new();
+    private readonly TableLayoutPanel _typeFieldsTable = new();
+    private readonly Label _typeInfoLabel = new();
+    private readonly TextBox _advancedJsonTextBox = new();
+    private readonly Button _applyAdvancedJsonButton = new();
+    private readonly Dictionary<string, FieldEditor> _commonEditors = new(StringComparer.Ordinal);
+    private readonly Dictionary<string, FieldEditor> _typeEditors = new(StringComparer.Ordinal);
+    private readonly List<PreviewMarker> _previewMarkers = [];
+
+    private JsonObject? _document;
+    private string? _configPath;
+    private int _selectedSchemeIndex;
+    private int _selectedControlIndex;
+    private bool _isLoadingUi;
+    private RectangleF _previewBounds;
+
+    internal MainForm()
+    {
+        InitializeComponent();
+        BuildFieldTables();
+        UpdateLivePathStatus();
+        LoadEmptyState();
+    }
+
+    private void InitializeComponent()
+    {
+        SuspendLayout();
+
+        Text = "BlueStacks CFG Editor";
+        StartPosition = FormStartPosition.CenterScreen;
+        MinimumSize = new Size(1200, 780);
+        ClientSize = new Size(1400, 900);
+
+        TableLayoutPanel root = new()
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            Padding = new Padding(10),
+        };
+        root.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        root.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        Controls.Add(root);
+
+        FlowLayoutPanel toolbar = new()
+        {
+            AutoSize = true,
+            Dock = DockStyle.Fill,
+            FlowDirection = FlowDirection.LeftToRight,
+            WrapContents = false,
+            Margin = Padding.Empty,
+        };
+        root.Controls.Add(toolbar, 0, 0);
+
+        Button openConfigButton = CreateToolbarButton("Open Config", (_, _) => RunUiAction(OpenConfig, "Open Failed"));
+        Button saveAsButton = CreateToolbarButton("Save As", (_, _) => RunUiAction(SaveAs, "Save Failed"));
+        Button wrapperSettingsButton = CreateToolbarButton("Wrapper Settings", (_, _) => RunUiAction(OpenWrapperSettings, "Wrapper Settings Failed"));
+        Button openLiveButton = CreateToolbarButton("Open Live", (_, _) => RunUiAction(OpenLiveConfig, "Open Live Failed"));
+        Button saveToLiveButton = CreateToolbarButton("Save To Live", (_, _) => RunUiAction(SaveToLive, "Live Save Failed"));
+
+        toolbar.Controls.Add(openConfigButton);
+        toolbar.Controls.Add(saveAsButton);
+        toolbar.Controls.Add(wrapperSettingsButton);
+        toolbar.Controls.Add(CreateToolbarSeparator());
+        toolbar.Controls.Add(new Label { Text = "Package", AutoSize = true, TextAlign = ContentAlignment.MiddleLeft, Margin = new Padding(8, 8, 4, 0) });
+
+        _packageComboBox.Width = 300;
+        _packageComboBox.DropDownStyle = ComboBoxStyle.DropDown;
+        _packageComboBox.AutoCompleteMode = AutoCompleteMode.SuggestAppend;
+        _packageComboBox.AutoCompleteSource = AutoCompleteSource.ListItems;
+        _packageComboBox.Margin = new Padding(0, 4, 8, 0);
+        foreach (string packageName in ConfigService.DiscoverLivePackages())
+        {
+            _packageComboBox.Items.Add(packageName);
+        }
+
+        _packageComboBox.Text = _packageComboBox.Items.Count > 0
+            ? _packageComboBox.Items[0]?.ToString() ?? string.Empty
+            : ConfigDefinitions.DefaultPackage;
+        _packageComboBox.SelectionChangeCommitted += (_, _) => UpdateLivePathStatus();
+        _packageComboBox.Leave += (_, _) => UpdateLivePathStatus();
+        _packageComboBox.KeyDown += (_, e) =>
+        {
+            if (e.KeyCode == Keys.Enter)
+            {
+                e.SuppressKeyPress = true;
+                UpdateLivePathStatus();
+            }
+        };
+        toolbar.Controls.Add(_packageComboBox);
+        toolbar.Controls.Add(openLiveButton);
+        toolbar.Controls.Add(saveToLiveButton);
+
+        _statusLabel.AutoSize = true;
+        _statusLabel.Margin = new Padding(16, 8, 0, 0);
+        _statusLabel.Text = "Open a .cfg or .json file to begin";
+        toolbar.Controls.Add(_statusLabel);
+
+        SplitContainer bodySplit = new()
+        {
+            Dock = DockStyle.Fill,
+            Orientation = Orientation.Vertical,
+        };
+        root.Controls.Add(bodySplit, 0, 1);
+
+        TableLayoutPanel sidebar = new()
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 6,
+            Padding = new Padding(0, 0, 8, 0),
+        };
+        sidebar.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        sidebar.RowStyles.Add(new RowStyle(SizeType.Absolute, 170));
+        sidebar.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        sidebar.RowStyles.Add(new RowStyle(SizeType.Percent, 45));
+        sidebar.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        sidebar.RowStyles.Add(new RowStyle(SizeType.Percent, 55));
+        bodySplit.Panel1.Controls.Add(sidebar);
+
+        sidebar.Controls.Add(new Label { Text = "Control Schemes", AutoSize = true, Dock = DockStyle.Fill }, 0, 0);
+
+        _schemeListBox.Dock = DockStyle.Fill;
+        _schemeListBox.IntegralHeight = false;
+        _schemeListBox.SelectedIndexChanged += (_, _) => OnSchemeSelectionChanged();
+        sidebar.Controls.Add(_schemeListBox, 0, 1);
+
+        _schemeSummaryLabel.AutoSize = true;
+        _schemeSummaryLabel.Dock = DockStyle.Fill;
+        _schemeSummaryLabel.Margin = new Padding(0, 8, 0, 4);
+        sidebar.Controls.Add(_schemeSummaryLabel, 0, 2);
+
+        _controlListBox.Dock = DockStyle.Fill;
+        _controlListBox.IntegralHeight = false;
+        _controlListBox.SelectedIndexChanged += (_, _) => OnControlSelectionChanged();
+        sidebar.Controls.Add(_controlListBox, 0, 3);
+
+        sidebar.Controls.Add(new Label { Text = "Preview", AutoSize = true, Dock = DockStyle.Fill, Margin = new Padding(0, 8, 0, 4) }, 0, 4);
+
+        _previewPanel.Dock = DockStyle.Fill;
+        _previewPanel.BackColor = Color.FromArgb(15, 23, 42);
+        _previewPanel.Paint += (_, e) => DrawPreview(e.Graphics);
+        _previewPanel.MouseClick += (_, e) => OnPreviewClicked(e.Location);
+        sidebar.Controls.Add(_previewPanel, 0, 5);
+
+        TableLayoutPanel mainArea = new()
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            Padding = new Padding(8, 0, 0, 0),
+        };
+        mainArea.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        mainArea.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        bodySplit.Panel2.Controls.Add(mainArea);
+
+        _controlTitleLabel.AutoSize = true;
+        _controlTitleLabel.Font = new Font(Font, FontStyle.Bold);
+        mainArea.Controls.Add(_controlTitleLabel, 0, 0);
+
+        TabControl tabs = new()
+        {
+            Dock = DockStyle.Fill,
+            Margin = new Padding(0, 8, 0, 0),
+        };
+        mainArea.Controls.Add(tabs, 0, 1);
+
+        TabPage propertiesTab = new() { Text = "Properties" };
+        TableLayoutPanel propertiesLayout = new()
+        {
+            AutoSize = true,
+            AutoSizeMode = AutoSizeMode.GrowAndShrink,
+            ColumnCount = 1,
+            RowCount = 4,
+        };
+        propertiesLayout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        propertiesLayout.Controls.Add(CreateSectionLabel("Common"), 0, 0);
+        propertiesLayout.Controls.Add(_commonFieldsTable, 0, 1);
+        _typeInfoLabel.AutoSize = true;
+        _typeInfoLabel.Font = new Font(Font, FontStyle.Bold);
+        _typeInfoLabel.Margin = new Padding(0, 18, 0, 4);
+        propertiesLayout.Controls.Add(_typeInfoLabel, 0, 2);
+        propertiesLayout.Controls.Add(_typeFieldsTable, 0, 3);
+        propertiesTab.Controls.Add(WrapInScrollPanel(propertiesLayout, padding: new Padding(10)));
+        tabs.TabPages.Add(propertiesTab);
+
+        TabPage advancedTab = new() { Text = "Advanced JSON" };
+        TableLayoutPanel advancedLayout = new()
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 1,
+            RowCount = 2,
+            Padding = new Padding(10),
+        };
+        advancedLayout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        advancedLayout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        _advancedJsonTextBox.Dock = DockStyle.Fill;
+        _advancedJsonTextBox.Multiline = true;
+        _advancedJsonTextBox.AcceptsReturn = true;
+        _advancedJsonTextBox.AcceptsTab = true;
+        _advancedJsonTextBox.ScrollBars = ScrollBars.Both;
+        _advancedJsonTextBox.WordWrap = false;
+        advancedLayout.Controls.Add(_advancedJsonTextBox, 0, 0);
+        _applyAdvancedJsonButton.Text = "Apply JSON To Selected Control";
+        _applyAdvancedJsonButton.AutoSize = true;
+        _applyAdvancedJsonButton.Anchor = AnchorStyles.Right;
+        _applyAdvancedJsonButton.Click += (_, _) => RunUiAction(ApplyAdvancedJson, "Advanced JSON Failed");
+        advancedLayout.Controls.Add(_applyAdvancedJsonButton, 0, 1);
+        advancedTab.Controls.Add(advancedLayout);
+        tabs.TabPages.Add(advancedTab);
+
+        ResumeLayout(performLayout: true);
+
+        // SplitContainer validates these values against its current width.
+        // Apply them only after the docked layout has assigned its final size.
+        bodySplit.SplitterDistance = 360;
+        bodySplit.Panel1MinSize = 320;
+        bodySplit.Panel2MinSize = 700;
+    }
+
+    private static Button CreateToolbarButton(string text, EventHandler onClick) =>
+        new Button()
+        {
+            Text = text,
+            AutoSize = true,
+            Margin = new Padding(0, 0, 8, 0),
+        }.Also(button => button.Click += onClick);
+
+    private static Control CreateToolbarSeparator() =>
+        new Label
+        {
+            BorderStyle = BorderStyle.Fixed3D,
+            Width = 2,
+            Height = 28,
+            Margin = new Padding(8, 0, 8, 0),
+        };
+
+    private static Label CreateSectionLabel(string text) =>
+        new()
+        {
+            Text = text,
+            AutoSize = true,
+            Font = new Font(SystemFonts.DefaultFont, FontStyle.Bold),
+            Margin = new Padding(0, 0, 0, 4),
+        };
+
+    private static Panel WrapInScrollPanel(Control child, Padding? padding = null)
+    {
+        Panel panel = new()
+        {
+            Dock = DockStyle.Fill,
+            AutoScroll = true,
+            Padding = padding ?? Padding.Empty,
+        };
+        child.Dock = DockStyle.Top;
+        panel.Controls.Add(child);
+        return panel;
+    }
+
+    private void BuildFieldTables()
+    {
+        ConfigureFieldTable(_commonFieldsTable);
+        PopulateFieldTable(_commonFieldsTable, ConfigDefinitions.CommonFields, _commonEditors);
+
+        ConfigureFieldTable(_typeFieldsTable);
+    }
+
+    private static void ConfigureFieldTable(TableLayoutPanel table)
+    {
+        table.AutoSize = true;
+        table.AutoSizeMode = AutoSizeMode.GrowAndShrink;
+        table.ColumnCount = 4;
+        table.RowCount = 0;
+        table.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        table.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        table.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 50));
+        table.GrowStyle = TableLayoutPanelGrowStyle.AddRows;
+    }
+
+    private void PopulateFieldTable(
+        TableLayoutPanel table,
+        IReadOnlyList<FieldDefinition> definitions,
+        Dictionary<string, FieldEditor> editors)
+    {
+        Dictionary<string, FieldDefinition> definitionsByName =
+            definitions.ToDictionary(definition => definition.Name, StringComparer.Ordinal);
+        HashSet<string> added = new(StringComparer.Ordinal);
+
+        foreach (FieldDefinition definition in definitions)
+        {
+            if (!added.Add(definition.Name))
+            {
+                continue;
+            }
+
+            int row = AddFieldRow(table);
+            string? yCounterpartName = GetYCounterpartName(definition.Name);
+            if (yCounterpartName is not null
+                && definitionsByName.TryGetValue(yCounterpartName, out FieldDefinition? yDefinition)
+                && added.Add(yDefinition.Name))
+            {
+                editors[definition.Name] = AddFieldEditor(table, definition, CommitStandardField, row, 0, 1);
+                editors[yDefinition.Name] = AddFieldEditor(table, yDefinition, CommitStandardField, row, 2, 3);
+            }
+            else
+            {
+                editors[definition.Name] = AddFieldEditor(table, definition, CommitStandardField, row, 0, 1, 3);
+            }
+        }
+    }
+
+    private static int AddFieldRow(TableLayoutPanel table)
+    {
+        int row = table.RowCount++;
+        table.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        return row;
+    }
+
+    private static string? GetYCounterpartName(string name)
+    {
+        int xIndex = name.IndexOf('X');
+        return xIndex < 0
+            ? null
+            : string.Concat(name.AsSpan(0, xIndex), "Y", name.AsSpan(xIndex + 1));
+    }
+
+    private FieldEditor AddFieldEditor(
+        TableLayoutPanel table,
+        FieldDefinition definition,
+        Action<FieldEditor> onCommit,
+        int row,
+        int labelColumn,
+        int editorColumn,
+        int editorColumnSpan = 1)
+    {
+
+        Label label = new()
+        {
+            Text = definition.Name,
+            AutoSize = true,
+            Anchor = AnchorStyles.Left,
+            Margin = new Padding(0, 8, 8, 0),
+        };
+        table.Controls.Add(label, labelColumn, row);
+
+        Control editorControl;
+        switch (definition.Kind)
+        {
+            case FieldKind.Bool:
+                CheckBox checkBox = new()
+                {
+                    AutoSize = true,
+                    Anchor = AnchorStyles.Left,
+                    Margin = new Padding(0, 4, 0, 0),
+                };
+                checkBox.CheckedChanged += (_, _) => onCommit(new FieldEditor(definition, checkBox));
+                editorControl = checkBox;
+                break;
+            case FieldKind.StringList:
+                TextBox listTextBox = new()
+                {
+                    Multiline = true,
+                    AcceptsReturn = true,
+                    ScrollBars = ScrollBars.Vertical,
+                    WordWrap = false,
+                    Height = 110,
+                    Dock = DockStyle.Fill,
+                    Margin = new Padding(0, 4, 0, 0),
+                };
+                listTextBox.Leave += (_, _) => onCommit(new FieldEditor(definition, listTextBox));
+                listTextBox.KeyDown += (_, e) =>
+                {
+                    if (e.KeyCode == Keys.Enter && !e.Shift)
+                    {
+                        e.SuppressKeyPress = true;
+                        onCommit(new FieldEditor(definition, listTextBox));
+                    }
+                };
+                editorControl = listTextBox;
+                break;
+            default:
+                TextBox textBox = new()
+                {
+                    Dock = DockStyle.Top,
+                    Margin = new Padding(0, 4, 0, 0),
+                };
+                textBox.Leave += (_, _) => onCommit(new FieldEditor(definition, textBox));
+                textBox.KeyDown += (_, e) =>
+                {
+                    if (e.KeyCode == Keys.Enter)
+                    {
+                        e.SuppressKeyPress = true;
+                        onCommit(new FieldEditor(definition, textBox));
+                    }
+                };
+                editorControl = textBox;
+                break;
+        }
+
+        table.Controls.Add(editorControl, editorColumn, row);
+        if (editorColumnSpan > 1)
+        {
+            table.SetColumnSpan(editorControl, editorColumnSpan);
+        }
+
+        return new FieldEditor(definition, editorControl);
+    }
+
+    private void OpenConfig()
+    {
+        using OpenFileDialog dialog = new()
+        {
+            Title = "Open BlueStacks Config",
+            Filter = "CFG / JSON (*.cfg;*.json)|*.cfg;*.json|All Files (*.*)|*.*",
+        };
+
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+        {
+            return;
+        }
+
+        LoadConfigFromPath(dialog.FileName);
+    }
+
+    private void OpenLiveConfig()
+    {
+        string livePath;
+        try
+        {
+            livePath = UpdateLivePathStatus();
+        }
+        catch (Exception ex) when (ex is ArgumentException or DirectoryNotFoundException)
+        {
+            MessageBox.Show(this, ex.Message, "Live Config Unavailable", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+
+        if (!File.Exists(livePath))
+        {
+            MessageBox.Show(this, $"BlueStacks live config was not found:\n{livePath}", "Live Config Not Found", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+
+        LoadConfigFromPath(livePath);
+    }
+
+    private void LoadConfigFromPath(string path)
+    {
+        JsonObject document = ConfigService.LoadConfig(path);
+        _document = document;
+        _configPath = path;
+        _selectedSchemeIndex = 0;
+        _selectedControlIndex = 0;
+        RefreshSchemeList();
+        RefreshControlList();
+        LoadSelectedControlIntoUi();
+        SetStatus($"Loaded {path}");
+    }
+
+    private void SaveAs()
+    {
+        if (_document is null)
+        {
+            MessageBox.Show(this, "Open a config file first.", "Nothing To Save", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        using SaveFileDialog dialog = new()
+        {
+            Title = "Save Config As",
+            Filter = "CFG / JSON (*.cfg;*.json)|*.cfg;*.json|All Files (*.*)|*.*",
+            DefaultExt = "cfg",
+            FileName = _configPath is null ? "edited.cfg" : Path.GetFileName(_configPath),
+        };
+
+        if (dialog.ShowDialog(this) != DialogResult.OK)
+        {
+            return;
+        }
+
+        ConfigService.SaveConfig(_document, dialog.FileName);
+        SetStatus($"Saved {dialog.FileName}");
+    }
+
+    private void SaveToLive()
+    {
+        if (_document is null)
+        {
+            MessageBox.Show(this, "Open a config file first.", "Nothing To Save", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        string packageName = _packageComboBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(packageName))
+        {
+            MessageBox.Show(this, "Package name is empty.", "Invalid Package", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+
+        string? validationError = ConfigService.ValidateForLiveSave(_document);
+        if (validationError is not null)
+        {
+            MessageBox.Show(this, validationError, "Invalid KMM Config", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+
+        try
+        {
+            LiveSaveResult result = ConfigService.SaveToLive(_document, packageName);
+            string backupSuffix = result.BackupPath is null ? string.Empty : $" (backup: {Path.GetFileName(result.BackupPath)})";
+            SetStatus($"Saved live config: {result.LivePath}{backupSuffix}; reload requested");
+        }
+        catch (DirectoryNotFoundException ex)
+        {
+            MessageBox.Show(this, ex.Message, "Live Folder Not Found", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        catch (InvalidDataException ex)
+        {
+            MessageBox.Show(this, ex.Message, "Invalid KMM Config", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+    }
+
+    private void RefreshSchemeList()
+    {
+        bool wasLoadingUi = _isLoadingUi;
+        _isLoadingUi = true;
+        _schemeListBox.BeginUpdate();
+        try
+        {
+            _schemeListBox.Items.Clear();
+
+            JsonArray? schemes = _document?["ControlSchemes"] as JsonArray;
+            if (schemes is not null)
+            {
+                foreach (JsonNode? schemeNode in schemes)
+                {
+                    if (schemeNode is JsonObject schemeObject)
+                    {
+                        string label = schemeObject["Name"]?.GetValue<string?>() ?? "Unnamed scheme";
+                        if (schemeObject["Selected"]?.GetValue<bool?>() == true)
+                        {
+                            label += " [selected]";
+                        }
+
+                        _schemeListBox.Items.Add(label);
+                    }
+                }
+            }
+
+            if (_schemeListBox.Items.Count > 0)
+            {
+                _selectedSchemeIndex = Math.Clamp(_selectedSchemeIndex, 0, _schemeListBox.Items.Count - 1);
+                _schemeListBox.SelectedIndex = _selectedSchemeIndex;
+            }
+        }
+        finally
+        {
+            _schemeListBox.EndUpdate();
+            _isLoadingUi = wasLoadingUi;
+        }
+
+        JsonObject? selectedScheme = GetSelectedScheme();
+        if (selectedScheme is null)
+        {
+            _schemeSummaryLabel.Text = "No schemes";
+        }
+        else
+        {
+            int controlCount = (selectedScheme["GameControls"] as JsonArray)?.Count ?? 0;
+            string name = selectedScheme["Name"]?.GetValue<string?>() ?? "Unnamed";
+            _schemeSummaryLabel.Text = $"Scheme: {name} ({controlCount} controls)";
+        }
+    }
+
+    private void RefreshControlList()
+    {
+        bool wasLoadingUi = _isLoadingUi;
+        _isLoadingUi = true;
+        _controlListBox.BeginUpdate();
+        try
+        {
+            _controlListBox.Items.Clear();
+
+            JsonArray? controls = GetSelectedScheme()?["GameControls"] as JsonArray;
+            if (controls is not null)
+            {
+                foreach (JsonNode? controlNode in controls)
+                {
+                    if (controlNode is JsonObject controlObject)
+                    {
+                        _controlListBox.Items.Add(FormatControlLabel(controlObject));
+                    }
+                }
+            }
+
+            if (_controlListBox.Items.Count > 0)
+            {
+                _selectedControlIndex = Math.Clamp(_selectedControlIndex, 0, _controlListBox.Items.Count - 1);
+                _controlListBox.SelectedIndex = _selectedControlIndex;
+            }
+            else
+            {
+                _selectedControlIndex = 0;
+            }
+        }
+        finally
+        {
+            _controlListBox.EndUpdate();
+            _isLoadingUi = wasLoadingUi;
+        }
+
+        _previewPanel.Invalidate();
+    }
+
+    private void LoadSelectedControlIntoUi()
+    {
+        _isLoadingUi = true;
+        try
+        {
+            JsonObject? control = GetSelectedControl();
+            JsonObject? selectedScheme = GetSelectedScheme();
+            if (selectedScheme is null)
+            {
+                _schemeSummaryLabel.Text = "No schemes";
+            }
+            else
+            {
+                int controlCount = (selectedScheme["GameControls"] as JsonArray)?.Count ?? 0;
+                string schemeName = selectedScheme["Name"]?.GetValue<string?>() ?? "Unnamed";
+                _schemeSummaryLabel.Text = $"Scheme: {schemeName} ({controlCount} controls)";
+            }
+
+            if (control is null)
+            {
+                _controlTitleLabel.Text = "No control selected";
+                _typeInfoLabel.Text = "No control selected.";
+                ClearEditors(_commonEditors.Values);
+                ClearEditors(_typeEditors.Values);
+                _advancedJsonTextBox.Clear();
+                _previewPanel.Invalidate();
+                return;
+            }
+
+            _controlTitleLabel.Text = FormatControlLabel(control);
+            LoadEditors(_commonEditors.Values, control);
+            RebuildTypeEditorSection(control["Type"]?.GetValue<string?>());
+            LoadEditors(_typeEditors.Values, control);
+            _advancedJsonTextBox.Text = ConfigDefinitions.SerializeNode(control);
+            _previewPanel.Invalidate();
+        }
+        finally
+        {
+            _isLoadingUi = false;
+        }
+    }
+
+    private void ClearEditors(IEnumerable<FieldEditor> editors)
+    {
+        foreach (FieldEditor editor in editors)
+        {
+            SetEditorValue(editor, null);
+        }
+    }
+
+    private void LoadEditors(IEnumerable<FieldEditor> editors, JsonObject source)
+    {
+        foreach (FieldEditor editor in editors)
+        {
+            SetEditorValue(editor, source[editor.Definition.Name]);
+        }
+    }
+
+    private void SetEditorValue(FieldEditor editor, JsonNode? value)
+    {
+        switch (editor.Control)
+        {
+            case CheckBox checkBox:
+                checkBox.Checked = value?.GetValue<bool?>() ?? false;
+                break;
+            case TextBox textBox when editor.Definition.Kind == FieldKind.StringList:
+                if (value is JsonArray array)
+                {
+                    List<string> lines = [];
+                    foreach (JsonNode? node in array)
+                    {
+                        lines.Add(node?.GetValue<string?>() ?? string.Empty);
+                    }
+
+                    textBox.Text = string.Join(Environment.NewLine, lines);
+                }
+                else
+                {
+                    textBox.Clear();
+                }
+
+                break;
+            case TextBox textBox when editor.Definition.Kind == FieldKind.Float:
+                textBox.Text = ConfigService.TryGetDouble(value, out double number)
+                    ? ConfigDefinitions.FormatDouble(number)
+                    : string.Empty;
+                break;
+            case TextBox textBox:
+                textBox.Text = value?.ToString() ?? string.Empty;
+                break;
+        }
+    }
+
+    private void RebuildTypeEditorSection(string? controlType)
+    {
+        _typeFieldsTable.SuspendLayout();
+        _typeFieldsTable.Controls.Clear();
+        _typeFieldsTable.RowStyles.Clear();
+        _typeFieldsTable.RowCount = 0;
+        _typeEditors.Clear();
+
+        if (string.IsNullOrWhiteSpace(controlType))
+        {
+            _typeInfoLabel.Text = "Selected control has no Type.";
+            _typeFieldsTable.ResumeLayout();
+            return;
+        }
+
+        if (!ConfigDefinitions.TypeFields.TryGetValue(controlType, out IReadOnlyList<FieldDefinition>? definitions))
+        {
+            _typeInfoLabel.Text = $"Unsupported control type: {controlType}. Use Advanced JSON to edit additional properties.";
+            _typeFieldsTable.ResumeLayout();
+            return;
+        }
+
+        _typeInfoLabel.Text = $"Editing fields for {controlType}";
+        PopulateFieldTable(_typeFieldsTable, definitions, _typeEditors);
+
+        _typeFieldsTable.ResumeLayout(performLayout: true);
+    }
+
+    private void CommitStandardField(FieldEditor editor)
+    {
+        if (_isLoadingUi)
+        {
+            return;
+        }
+
+        JsonObject? control = GetSelectedControl();
+        if (control is null)
+        {
+            return;
+        }
+
+        if (!TryCreateNodeFromEditor(editor, out JsonNode? newValue, out string? errorMessage))
+        {
+            MessageBox.Show(this, errorMessage, "Invalid Field Value", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            _isLoadingUi = true;
+            try
+            {
+                SetEditorValue(editor, control[editor.Definition.Name]);
+            }
+            finally
+            {
+                _isLoadingUi = false;
+            }
+
+            return;
+        }
+
+        control[editor.Definition.Name] = newValue;
+        SyncSelectedControlJson(control);
+        RefreshSelectionDisplay();
+    }
+
+    private bool TryCreateNodeFromEditor(FieldEditor editor, out JsonNode? value, out string? errorMessage)
+    {
+        errorMessage = null;
+        switch (editor.Control)
+        {
+            case CheckBox checkBox:
+                value = JsonValue.Create(checkBox.Checked);
+                return true;
+            case TextBox textBox when editor.Definition.Kind == FieldKind.Int:
+            {
+                string text = textBox.Text.Trim();
+                if (text.Length == 0)
+                {
+                    value = JsonValue.Create(0);
+                    return true;
+                }
+
+                if (ConfigService.TryParseInteger(text, out int parsed))
+                {
+                    value = JsonValue.Create(parsed);
+                    return true;
+                }
+
+                value = null;
+                errorMessage = $"{editor.Definition.Name} must be an integer.";
+                return false;
+            }
+            case TextBox textBox when editor.Definition.Kind == FieldKind.Float:
+            {
+                string text = textBox.Text.Trim();
+                if (text.Length == 0)
+                {
+                    value = JsonValue.Create(0d);
+                    return true;
+                }
+
+                if (ConfigService.TryParseDouble(text, out double parsed))
+                {
+                    value = JsonValue.Create(parsed);
+                    return true;
+                }
+
+                value = null;
+                errorMessage = $"{editor.Definition.Name} must be a number using invariant formatting.";
+                return false;
+            }
+            case TextBox textBox when editor.Definition.Kind == FieldKind.StringList:
+            {
+                JsonArray array = [];
+                string normalized = textBox.Text.Replace("\r\n", "\n", StringComparison.Ordinal);
+                if (normalized.Length > 0)
+                {
+                    foreach (string line in normalized.Split('\n'))
+                    {
+                        array.Add(line);
+                    }
+                }
+
+                value = array;
+                return true;
+            }
+            case TextBox textBox:
+                value = JsonValue.Create(textBox.Text);
+                return true;
+            default:
+                value = null;
+                errorMessage = $"Unsupported editor for {editor.Definition.Name}.";
+                return false;
+        }
+    }
+
+    private void OpenWrapperSettings()
+    {
+        if (_document is null)
+        {
+            MessageBox.Show(this, "Open a config file first.", "No Config Loaded", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        using WrapperSettingsForm dialog = new(_document);
+        if (dialog.ShowDialog(this) == DialogResult.OK)
+        {
+            SetStatus("Updated wrapper settings");
+        }
+    }
+
+    private void ApplyAdvancedJson()
+    {
+        JsonObject? existingControl = GetSelectedControl();
+        JsonObject? scheme = GetSelectedScheme();
+        JsonArray? controls = scheme?["GameControls"] as JsonArray;
+        if (existingControl is null || controls is null)
+        {
+            return;
+        }
+
+        JsonNode? parsed = JsonNode.Parse(_advancedJsonTextBox.Text);
+        if (parsed is not JsonObject replacement)
+        {
+            MessageBox.Show(this, "Advanced control JSON must be a JSON object.", "Invalid JSON", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+
+        controls[_selectedControlIndex] = replacement;
+        RefreshControlList();
+        LoadSelectedControlIntoUi();
+        SetStatus("Applied advanced JSON to selected control");
+    }
+
+    private void OnSchemeSelectionChanged()
+    {
+        if (_isLoadingUi || _schemeListBox.SelectedIndex < 0)
+        {
+            return;
+        }
+
+        _selectedSchemeIndex = _schemeListBox.SelectedIndex;
+        _selectedControlIndex = 0;
+        RefreshSchemeList();
+        RefreshControlList();
+        LoadSelectedControlIntoUi();
+    }
+
+    private void OnControlSelectionChanged()
+    {
+        if (_isLoadingUi || _controlListBox.SelectedIndex < 0)
+        {
+            return;
+        }
+
+        _selectedControlIndex = _controlListBox.SelectedIndex;
+        LoadSelectedControlIntoUi();
+    }
+
+    private JsonObject? GetSelectedScheme()
+    {
+        JsonArray? schemes = _document?["ControlSchemes"] as JsonArray;
+        if (schemes is null || schemes.Count == 0)
+        {
+            return null;
+        }
+
+        if (_selectedSchemeIndex < 0 || _selectedSchemeIndex >= schemes.Count)
+        {
+            return null;
+        }
+
+        return schemes[_selectedSchemeIndex] as JsonObject;
+    }
+
+    private JsonObject? GetSelectedControl()
+    {
+        JsonArray? controls = GetSelectedScheme()?["GameControls"] as JsonArray;
+        if (controls is null || controls.Count == 0)
+        {
+            return null;
+        }
+
+        if (_selectedControlIndex < 0 || _selectedControlIndex >= controls.Count)
+        {
+            return null;
+        }
+
+        return controls[_selectedControlIndex] as JsonObject;
+    }
+
+    private void RefreshSelectionDisplay()
+    {
+        JsonObject? control = GetSelectedControl();
+        if (control is null)
+        {
+            return;
+        }
+
+        _controlTitleLabel.Text = FormatControlLabel(control);
+        if (_selectedControlIndex >= 0 && _selectedControlIndex < _controlListBox.Items.Count)
+        {
+            _controlListBox.Items[_selectedControlIndex] = FormatControlLabel(control);
+        }
+
+        _previewPanel.Invalidate();
+    }
+
+    private void SyncSelectedControlJson(JsonObject control)
+    {
+        _advancedJsonTextBox.Text = ConfigDefinitions.SerializeNode(control);
+    }
+
+    private string UpdateLivePathStatus()
+    {
+        string livePath = ConfigService.GetLiveConfigPath(_packageComboBox.Text.Trim());
+        SetStatus(File.Exists(livePath) ? $"Live config: {livePath}" : $"Live config not found: {livePath}");
+        return livePath;
+    }
+
+    private void SetStatus(string text) => _statusLabel.Text = text;
+
+    private void LoadEmptyState()
+    {
+        _document = null;
+        _configPath = null;
+        _selectedSchemeIndex = 0;
+        _selectedControlIndex = 0;
+        _schemeListBox.Items.Clear();
+        _controlListBox.Items.Clear();
+        _schemeSummaryLabel.Text = "No schemes";
+        _controlTitleLabel.Text = "No control selected";
+        _typeInfoLabel.Text = "No control selected.";
+        ClearEditors(_commonEditors.Values);
+        ClearEditors(_typeEditors.Values);
+        _advancedJsonTextBox.Clear();
+        _previewPanel.Invalidate();
+    }
+
+    private string FormatControlLabel(JsonObject control)
+    {
+        string controlType = control["Type"]?.GetValue<string?>() ?? "Control";
+        if (control["Guidance"] is JsonObject guidance)
+        {
+            string? keyActivate = guidance["KeyActivate"]?.GetValue<string?>();
+            if (!string.IsNullOrWhiteSpace(keyActivate))
+            {
+                return $"{controlType} - {keyActivate}";
+            }
+
+            string? dpadTitle = guidance["DpadTitle"]?.GetValue<string?>();
+            if (!string.IsNullOrWhiteSpace(dpadTitle))
+            {
+                return $"{controlType} - {dpadTitle}";
+            }
+        }
+
+        string? topLevelKeyActivate = control["KeyActivate"]?.GetValue<string?>();
+        if (!string.IsNullOrWhiteSpace(topLevelKeyActivate))
+        {
+            return $"{controlType} - {topLevelKeyActivate}";
+        }
+
+        string? key = control["Key"]?.GetValue<string?>();
+        if (!string.IsNullOrWhiteSpace(key))
+        {
+            return $"{controlType} - {key}";
+        }
+
+        return controlType;
+    }
+
+    private void DrawPreview(Graphics graphics)
+    {
+        graphics.SmoothingMode = SmoothingMode.AntiAlias;
+        graphics.Clear(_previewPanel.BackColor);
+        _previewMarkers.Clear();
+
+        JsonArray? controls = GetSelectedScheme()?["GameControls"] as JsonArray;
+        if (controls is null)
+        {
+            _previewBounds = RectangleF.Empty;
+            return;
+        }
+
+        float width = Math.Max(_previewPanel.ClientSize.Width, 320);
+        float height = Math.Max(_previewPanel.ClientSize.Height, 220);
+        const float margin = 12f;
+        float innerWidth = width - (margin * 2);
+        float innerHeight = Math.Min(height - (margin * 2), innerWidth * 9f / 16f);
+        innerWidth = innerHeight * 16f / 9f;
+        float offsetX = (width - innerWidth) / 2f;
+        float offsetY = (height - innerHeight) / 2f;
+        _previewBounds = new RectangleF(offsetX, offsetY, innerWidth, innerHeight);
+
+        using Pen borderPen = new(Color.FromArgb(51, 65, 85), 2);
+        using SolidBrush surfaceBrush = new(Color.FromArgb(17, 24, 39));
+        graphics.FillRectangle(surfaceBrush, _previewBounds);
+        graphics.DrawRectangle(borderPen, _previewBounds.X, _previewBounds.Y, _previewBounds.Width, _previewBounds.Height);
+
+        using Pen gridPen = new(Color.FromArgb(31, 41, 55), 1);
+        for (int tick = 1; tick < 10; tick++)
+        {
+            float x = offsetX + (innerWidth * tick / 10f);
+            float y = offsetY + (innerHeight * tick / 10f);
+            graphics.DrawLine(gridPen, x, offsetY, x, offsetY + innerHeight);
+            graphics.DrawLine(gridPen, offsetX, y, offsetX + innerWidth, y);
+        }
+
+        using Font font = new(Font.FontFamily, 8, FontStyle.Regular);
+        using Brush captionBrush = new SolidBrush(Color.FromArgb(148, 163, 184));
+        graphics.DrawString("0,0", font, captionBrush, offsetX + 8, offsetY + 8);
+
+        SizeF bottomTextSize = graphics.MeasureString("100,100", font);
+        graphics.DrawString("100,100", font, captionBrush, offsetX + innerWidth - bottomTextSize.Width - 8, offsetY + innerHeight - bottomTextSize.Height - 8);
+
+        for (int i = 0; i < controls.Count; i++)
+        {
+            if (controls[i] is not JsonObject control)
+            {
+                continue;
+            }
+
+            double xValue = ConfigService.TryGetDouble(control["X"], out double x) ? x : 0d;
+            double yValue = ConfigService.TryGetDouble(control["Y"], out double y) ? y : 0d;
+            float canvasX = offsetX + (float)(xValue / 100d * innerWidth);
+            float canvasY = offsetY + (float)(yValue / 100d * innerHeight);
+            bool selected = i == _selectedControlIndex;
+            float radius = selected ? 10f : 7f;
+            Color fillColor = selected ? Color.FromArgb(245, 158, 11) : Color.FromArgb(56, 189, 248);
+            Color outlineColor = selected ? Color.FromArgb(248, 250, 252) : Color.FromArgb(15, 23, 42);
+            RectangleF markerBounds = new(canvasX - radius, canvasY - radius, radius * 2, radius * 2);
+
+            using SolidBrush fillBrush = new(fillColor);
+            using Pen markerPen = new(outlineColor, 2);
+            graphics.FillEllipse(fillBrush, markerBounds);
+            graphics.DrawEllipse(markerPen, markerBounds);
+
+            using Font numberFont = new(Font.FontFamily, 9, FontStyle.Bold);
+            using Brush numberBrush = new SolidBrush(Color.FromArgb(229, 231, 235));
+            string label = (i + 1).ToString(CultureInfo.InvariantCulture);
+            SizeF labelSize = graphics.MeasureString(label, numberFont);
+            graphics.DrawString(label, numberFont, numberBrush, canvasX - (labelSize.Width / 2), canvasY - radius - labelSize.Height - 2);
+
+            _previewMarkers.Add(new PreviewMarker(i, markerBounds));
+        }
+    }
+
+    private void OnPreviewClicked(Point location)
+    {
+        if (_previewMarkers.Count == 0)
+        {
+            return;
+        }
+
+        PreviewMarker? hit = _previewMarkers
+            .Where(marker => Inflate(marker.Bounds, 6f).Contains(location))
+            .OrderBy(marker => DistanceSquared(location, marker.Bounds))
+            .FirstOrDefault();
+
+        if (hit is null)
+        {
+            return;
+        }
+
+        _selectedControlIndex = hit.Index;
+        _controlListBox.SelectedIndex = hit.Index;
+        _controlListBox.TopIndex = hit.Index;
+        LoadSelectedControlIntoUi();
+    }
+
+    private void RunUiAction(Action action, string title)
+    {
+        try
+        {
+            action();
+        }
+        catch (JsonException ex)
+        {
+            MessageBox.Show(this, ex.Message, title, MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        catch (InvalidDataException ex)
+        {
+            MessageBox.Show(this, ex.Message, title, MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        catch (Exception ex)
+        {
+            ErrorLogger.ShowUnexpectedError(this, title, ex);
+        }
+    }
+
+    private static RectangleF Inflate(RectangleF rectangle, float amount) =>
+        RectangleF.FromLTRB(rectangle.Left - amount, rectangle.Top - amount, rectangle.Right + amount, rectangle.Bottom + amount);
+
+    private static float DistanceSquared(Point point, RectangleF rectangle)
+    {
+        float centerX = rectangle.Left + (rectangle.Width / 2f);
+        float centerY = rectangle.Top + (rectangle.Height / 2f);
+        float dx = point.X - centerX;
+        float dy = point.Y - centerY;
+        return (dx * dx) + (dy * dy);
+    }
+}
+
+internal sealed record FieldEditor(FieldDefinition Definition, Control Control);
+
+internal sealed record PreviewMarker(int Index, RectangleF Bounds);
+
+internal static class ControlExtensions
+{
+    internal static T Also<T>(this T value, Action<T> configure)
+    {
+        configure(value);
+        return value;
+    }
+}

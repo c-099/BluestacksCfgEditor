@@ -1,0 +1,6 @@
+System.InvalidOperationException: SplitterDistance must be between Panel1MinSize and Width - Panel2MinSize.
+   at System.Windows.Forms.SplitContainer.set_SplitterDistance(Int32 value)
+   at System.Windows.Forms.SplitContainer.ApplyPanel2MinSize(Int32 value)
+   at BluestacksCfgEditor.MainForm.InitializeComponent() in C:\Users\User\Documents\BluestacksCfgEditor\BluestacksCfgEditor\MainForm.cs:line 104
+   at BluestacksCfgEditor.MainForm..ctor() in C:\Users\User\Documents\BluestacksCfgEditor\BluestacksCfgEditor\MainForm.cs:line 37
+   at BluestacksCfgEditor.Program.Main() in C:\Users\User\Documents\BluestacksCfgEditor\BluestacksCfgEditor\Program.cs:line 19

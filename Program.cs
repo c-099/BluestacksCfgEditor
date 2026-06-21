@@ -2,16 +2,26 @@ namespace BluestacksCfgEditor
 {
     internal static class Program
     {
-        /// <summary>
-        ///  The main entry point for the application.
-        /// </summary>
         [STAThread]
-        static void Main()
+        private static void Main()
         {
-            // To customize application configuration such as set high DPI settings or default font,
-            // see https://aka.ms/applicationconfiguration.
             ApplicationConfiguration.Initialize();
-            Application.Run(new Form1());
+            Application.ThreadException += (_, e) => ErrorLogger.ShowUnexpectedError(null, "BlueStacks CFG Editor Error", e.Exception);
+            AppDomain.CurrentDomain.UnhandledException += (_, e) =>
+            {
+                Exception exception = e.ExceptionObject as Exception
+                    ?? new InvalidOperationException("A non-exception unhandled error occurred.");
+                ErrorLogger.LogException(exception);
+            };
+
+            try
+            {
+                Application.Run(new MainForm());
+            }
+            catch (Exception ex)
+            {
+                ErrorLogger.ShowUnexpectedError(null, "BlueStacks CFG Editor Error", ex);
+            }
         }
     }
 }
