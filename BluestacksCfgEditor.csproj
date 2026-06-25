@@ -22,6 +22,7 @@
           AfterTargets="Build"
           Condition="'$(Configuration)' == 'Release'
                      and '$(DesignTimeBuild)' != 'true'
+                     and '$(PublishDir)' == ''
                      and '$(AutoPublishSelfContainedRelease)' != 'true'">
     <MSBuild Projects="$(MSBuildProjectFullPath)"
              Targets="Publish"

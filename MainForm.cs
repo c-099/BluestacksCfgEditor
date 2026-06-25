@@ -19,6 +19,7 @@ internal sealed class MainForm : Form
     private readonly Label _typeInfoLabel = new();
     private readonly TextBox _advancedJsonTextBox = new();
     private readonly Button _applyAdvancedJsonButton = new();
+    private readonly ContextMenuStrip _schemeContextMenu = new();
     private readonly Dictionary<string, FieldEditor> _commonEditors = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FieldEditor> _typeEditors = new(StringComparer.Ordinal);
     private readonly List<PreviewMarker> _previewMarkers = [];
@@ -151,6 +152,10 @@ internal sealed class MainForm : Form
         _schemeListBox.Dock = DockStyle.Fill;
         _schemeListBox.IntegralHeight = false;
         _schemeListBox.SelectedIndexChanged += (_, _) => OnSchemeSelectionChanged();
+        _schemeListBox.MouseDoubleClick += (_, e) => RunUiAction(() => SelectSchemeForConfig(e.Location), "Select Scheme Failed");
+        _schemeListBox.MouseDown += (_, e) => SelectSchemeItemUnderMouse(e);
+        ConfigureSchemeContextMenu();
+        _schemeListBox.ContextMenuStrip = _schemeContextMenu;
         sidebar.Controls.Add(_schemeListBox, 0, 1);
 
         _schemeSummaryLabel.AutoSize = true;
@@ -258,6 +263,24 @@ internal sealed class MainForm : Form
             Height = 28,
             Margin = new Padding(8, 0, 8, 0),
         };
+
+    private void ConfigureSchemeContextMenu()
+    {
+        _schemeContextMenu.Items.Add("Clone", null, (_, _) => RunUiAction(CloneSelectedScheme, "Clone Scheme Failed"));
+        _schemeContextMenu.Items.Add("Delete", null, (_, _) => RunUiAction(DeleteSelectedScheme, "Delete Scheme Failed"));
+        _schemeContextMenu.Items.Add("Select", null, (_, _) => RunUiAction(SelectCurrentSchemeForConfig, "Select Scheme Failed"));
+        _schemeContextMenu.Items.Add("Rename", null, (_, _) => RunUiAction(RenameSelectedScheme, "Rename Scheme Failed"));
+        _schemeContextMenu.Opening += (_, e) =>
+        {
+            bool hasScheme = _schemeListBox.SelectedIndex >= 0 && GetSelectedScheme() is not null;
+            foreach (ToolStripItem item in _schemeContextMenu.Items)
+            {
+                item.Enabled = hasScheme;
+            }
+
+            e.Cancel = !hasScheme;
+        };
+    }
 
     private static Label CreateSectionLabel(string text) =>
         new()
@@ -904,6 +927,151 @@ internal sealed class MainForm : Form
         SetStatus("Applied advanced JSON to selected control");
     }
 
+    private void CloneSelectedScheme()
+    {
+        JsonArray? schemes = GetControlSchemes();
+        JsonObject? selectedScheme = GetSelectedScheme();
+        if (schemes is null || selectedScheme is null)
+        {
+            MessageBox.Show(this, "Open a config file with at least one control scheme first.", "No Scheme Selected", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        if (selectedScheme.DeepClone() is not JsonObject clonedScheme)
+        {
+            throw new InvalidDataException("The selected control scheme could not be cloned.");
+        }
+
+        string originalName = selectedScheme["Name"]?.GetValue<string?>() ?? "Unnamed scheme";
+        string clonedName = CreateCopySchemeName(schemes, originalName);
+        clonedScheme["Name"] = clonedName;
+        clonedScheme["Selected"] = false;
+
+        _selectedSchemeIndex++;
+        _selectedControlIndex = 0;
+        schemes.Insert(_selectedSchemeIndex, clonedScheme);
+        RefreshSchemeList();
+        RefreshControlList();
+        LoadSelectedControlIntoUi();
+        SetStatus($"Cloned scheme: {clonedName}");
+    }
+
+    private void DeleteSelectedScheme()
+    {
+        JsonArray? schemes = GetControlSchemes();
+        JsonObject? selectedScheme = GetSelectedScheme();
+        if (schemes is null || selectedScheme is null)
+        {
+            MessageBox.Show(this, "Open a config file with at least one control scheme first.", "No Scheme Selected", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        string schemeName = selectedScheme["Name"]?.GetValue<string?>() ?? "Unnamed scheme";
+        DialogResult result = MessageBox.Show(
+            this,
+            $"Delete control scheme \"{schemeName}\"?\n\nThis removes the scheme from the open config.",
+            "Confirm Delete Scheme",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Warning,
+            MessageBoxDefaultButton.Button2);
+
+        if (result != DialogResult.Yes)
+        {
+            return;
+        }
+
+        schemes.RemoveAt(_selectedSchemeIndex);
+        _selectedSchemeIndex = schemes.Count > 0
+            ? Math.Clamp(_selectedSchemeIndex, 0, schemes.Count - 1)
+            : 0;
+        _selectedControlIndex = 0;
+
+        RefreshSchemeList();
+        RefreshControlList();
+        LoadSelectedControlIntoUi();
+        SetStatus($"Deleted scheme: {schemeName}");
+    }
+
+    private void RenameSelectedScheme()
+    {
+        JsonObject? selectedScheme = GetSelectedScheme();
+        if (selectedScheme is null)
+        {
+            MessageBox.Show(this, "Open a config file with at least one control scheme first.", "No Scheme Selected", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
+        string oldName = selectedScheme["Name"]?.GetValue<string?>() ?? "Unnamed scheme";
+        string? newName = PromptForSchemeName(oldName);
+        if (newName is null)
+        {
+            return;
+        }
+
+        selectedScheme["Name"] = newName;
+        RefreshSchemeList();
+        RefreshControlList();
+        LoadSelectedControlIntoUi();
+        SetStatus($"Renamed scheme: {oldName} -> {newName}");
+    }
+
+    private void SelectSchemeForConfig(Point location)
+    {
+        int clickedIndex = _schemeListBox.IndexFromPoint(location);
+        if (clickedIndex < 0 || clickedIndex >= _schemeListBox.Items.Count)
+        {
+            return;
+        }
+
+        SelectSchemeForConfig(clickedIndex);
+    }
+
+    private void SelectCurrentSchemeForConfig()
+    {
+        if (_selectedSchemeIndex < 0 || _selectedSchemeIndex >= _schemeListBox.Items.Count)
+        {
+            return;
+        }
+
+        SelectSchemeForConfig(_selectedSchemeIndex);
+    }
+
+    private void SelectSchemeForConfig(int selectedIndex)
+    {
+        JsonArray? schemes = GetControlSchemes();
+        if (schemes is null || selectedIndex < 0 || selectedIndex >= schemes.Count)
+        {
+            return;
+        }
+
+        _selectedSchemeIndex = selectedIndex;
+        _selectedControlIndex = 0;
+        SetOnlySelectedScheme(selectedIndex);
+        RefreshSchemeList();
+        RefreshControlList();
+        LoadSelectedControlIntoUi();
+
+        string schemeName = GetSelectedScheme()?["Name"]?.GetValue<string?>() ?? "Unnamed scheme";
+        SetStatus($"Selected scheme for config: {schemeName}");
+    }
+
+    private void SelectSchemeItemUnderMouse(MouseEventArgs e)
+    {
+        if (e.Button != MouseButtons.Right)
+        {
+            return;
+        }
+
+        int clickedIndex = _schemeListBox.IndexFromPoint(e.Location);
+        if (clickedIndex < 0 || clickedIndex >= _schemeListBox.Items.Count)
+        {
+            _schemeListBox.ClearSelected();
+            return;
+        }
+
+        _schemeListBox.SelectedIndex = clickedIndex;
+    }
+
     private void OnSchemeSelectionChanged()
     {
         if (_isLoadingUi || _isClosing || _schemeListBox.SelectedIndex < 0)
@@ -929,9 +1097,97 @@ internal sealed class MainForm : Form
         LoadSelectedControlIntoUi();
     }
 
+    private string? PromptForSchemeName(string currentName)
+    {
+        using Form dialog = new()
+        {
+            Text = "Rename Control Scheme",
+            StartPosition = FormStartPosition.CenterParent,
+            FormBorderStyle = FormBorderStyle.FixedDialog,
+            MinimizeBox = false,
+            MaximizeBox = false,
+            ShowInTaskbar = false,
+            ClientSize = new Size(420, 116),
+        };
+
+        TableLayoutPanel layout = new()
+        {
+            Dock = DockStyle.Fill,
+            ColumnCount = 2,
+            RowCount = 3,
+            Padding = new Padding(12),
+        };
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+        layout.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        layout.RowStyles.Add(new RowStyle(SizeType.Percent, 100));
+        layout.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        dialog.Controls.Add(layout);
+
+        Label nameLabel = new()
+        {
+            Text = "Name",
+            AutoSize = true,
+            Anchor = AnchorStyles.Left,
+            Margin = new Padding(0, 4, 8, 0),
+        };
+        layout.Controls.Add(nameLabel, 0, 0);
+
+        TextBox nameTextBox = new()
+        {
+            Text = currentName,
+            Dock = DockStyle.Top,
+        };
+        layout.Controls.Add(nameTextBox, 1, 0);
+
+        FlowLayoutPanel buttons = new()
+        {
+            AutoSize = true,
+            Anchor = AnchorStyles.Right,
+            FlowDirection = FlowDirection.RightToLeft,
+            WrapContents = false,
+            Margin = new Padding(0, 12, 0, 0),
+        };
+        layout.Controls.Add(buttons, 0, 2);
+        layout.SetColumnSpan(buttons, 2);
+
+        Button okButton = new()
+        {
+            Text = "OK",
+            DialogResult = DialogResult.OK,
+            AutoSize = true,
+            Enabled = !string.IsNullOrWhiteSpace(currentName),
+        };
+        Button cancelButton = new()
+        {
+            Text = "Cancel",
+            DialogResult = DialogResult.Cancel,
+            AutoSize = true,
+            Margin = new Padding(8, 0, 0, 0),
+        };
+
+        nameTextBox.TextChanged += (_, _) => okButton.Enabled = !string.IsNullOrWhiteSpace(nameTextBox.Text);
+        buttons.Controls.Add(okButton);
+        buttons.Controls.Add(cancelButton);
+        dialog.AcceptButton = okButton;
+        dialog.CancelButton = cancelButton;
+        dialog.Shown += (_, _) =>
+        {
+            nameTextBox.Focus();
+            nameTextBox.SelectAll();
+        };
+
+        return dialog.ShowDialog(this) == DialogResult.OK
+            ? nameTextBox.Text.Trim()
+            : null;
+    }
+
+    private JsonArray? GetControlSchemes() =>
+        _document?["ControlSchemes"] as JsonArray;
+
     private JsonObject? GetSelectedScheme()
     {
-        JsonArray? schemes = _document?["ControlSchemes"] as JsonArray;
+        JsonArray? schemes = GetControlSchemes();
         if (schemes is null || schemes.Count == 0)
         {
             return null;
@@ -959,6 +1215,53 @@ internal sealed class MainForm : Form
         }
 
         return controls[_selectedControlIndex] as JsonObject;
+    }
+
+    private static string CreateCopySchemeName(JsonArray schemes, string originalName)
+    {
+        string baseName = string.IsNullOrWhiteSpace(originalName)
+            ? "Unnamed scheme"
+            : originalName.Trim();
+        string candidate = $"{baseName} Copy";
+        int suffix = 2;
+        while (SchemeNameExists(schemes, candidate))
+        {
+            candidate = $"{baseName} Copy {suffix}";
+            suffix++;
+        }
+
+        return candidate;
+    }
+
+    private static bool SchemeNameExists(JsonArray schemes, string name)
+    {
+        foreach (JsonNode? schemeNode in schemes)
+        {
+            if (schemeNode is JsonObject scheme
+                && string.Equals(scheme["Name"]?.GetValue<string?>(), name, StringComparison.Ordinal))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void SetOnlySelectedScheme(int selectedIndex)
+    {
+        JsonArray? schemes = GetControlSchemes();
+        if (schemes is null)
+        {
+            return;
+        }
+
+        for (int i = 0; i < schemes.Count; i++)
+        {
+            if (schemes[i] is JsonObject scheme)
+            {
+                scheme["Selected"] = i == selectedIndex;
+            }
+        }
     }
 
     private void RefreshSelectionDisplay()
