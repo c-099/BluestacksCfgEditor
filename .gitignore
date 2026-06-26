@@ -2,6 +2,17 @@
 [Bb]in/
 [Oo]bj/
 [Aa]rtifacts/
+[Xx]64/
+[Dd]ebug/
+[Rr]elease/
+*.tlog
+*.obj
+*.pdb
+*.ipdb
+*.iobj
+*.exp
+*.lib
+*.dll
 
 # Visual Studio
 .vs/

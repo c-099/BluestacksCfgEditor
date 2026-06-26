@@ -5,6 +5,7 @@
     <TargetFramework>net10.0-windows</TargetFramework>
     <Nullable>enable</Nullable>
     <UseWindowsForms>true</UseWindowsForms>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
     <ImplicitUsings>enable</ImplicitUsings>
     <Version>0.9.0</Version>
     <AssemblyVersion>0.9.0.0</AssemblyVersion>
@@ -17,6 +18,18 @@
     <SelfContained>true</SelfContained>
     <PublishSingleFile>true</PublishSingleFile>
   </PropertyGroup>
+
+  <PropertyGroup>
+    <WrapperDllSource>$(MSBuildProjectDirectory)\BlueStacksDInputWrapper\x64\Release\dinput8.dll</WrapperDllSource>
+  </PropertyGroup>
+
+  <Target Name="CopyWrapperDllToOutput" AfterTargets="Build" Condition="Exists('$(WrapperDllSource)')">
+    <Copy SourceFiles="$(WrapperDllSource)" DestinationFolder="$(TargetDir)" />
+  </Target>
+
+  <Target Name="CopyWrapperDllToPublish" AfterTargets="Publish" Condition="Exists('$(WrapperDllSource)') and '$(PublishDir)' != ''">
+    <Copy SourceFiles="$(WrapperDllSource)" DestinationFolder="$(PublishDir)" />
+  </Target>
 
   <Target Name="AutoPublishSelfContainedRelease"
           AfterTargets="Build"

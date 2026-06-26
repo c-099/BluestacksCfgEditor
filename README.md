@@ -14,9 +14,10 @@ A Windows desktop editor for BlueStacks 5 `.cfg` game-control mapping files.
 - Edits common control properties and fields for D-pad, MOBA skill, tap-repeat, and script controls
 - Provides an interactive 16:9 position preview
 - Supports direct JSON editing for individual controls
-- Edits `DInputWrapper` settings
+- Edits wrapper settings in a separate `dinput8-config.json` file under the BlueStacks user data folder
 - Saves to a separate file or directly to the live BlueStacks configuration
-- Creates a timestamped backup before overwriting an existing live configuration
+- Keeps one rolling `.bak` backup before overwriting an existing live configuration
+- Bundles the BlueStacks `dinput8.dll` wrapper and can install it with administrator approval
 
 ## Requirements
 
@@ -40,7 +41,40 @@ dotnet publish BluestacksCfgEditor.slnx --configuration Release
 
 The release output is written to `bin/Release/net10.0-windows/win-x64/publish/` and produces a self-contained single-file executable.
 
+To build the native wrapper, publish the editor, and create a GitHub release zip:
+
+```powershell
+.\scripts\package-release.ps1
+```
+
+The release zip is written to:
+
+```text
+artifacts\release\BluestacksCfgEditor-v<version>-win-x64.zip
+```
+
 ## Usage
+
+Place the release files together before running the editor:
+
+```text
+<BlueStacks data directory>\Engine\UserData\BluestacksCfgEditor.exe
+<BlueStacks data directory>\Engine\UserData\dinput8.dll
+```
+
+If you start `BluestacksCfgEditor.exe` from another folder, it will offer to
+copy itself and the bundled `dinput8.dll` into the BlueStacks user data folder
+and relaunch from there.
+
+The wrapper DLL must also be installed in the BlueStacks application folder for
+live functionality:
+
+```text
+<BlueStacks install directory>\dinput8.dll
+```
+
+The editor prompts to copy it there with administrator approval when it is
+missing.
 
 1. Select **Open Config** to edit an existing `.cfg` or `.json` file, or select **Open Live** to load the configuration for the package shown in the package field.
 2. Choose a control scheme and control from the left panel.
@@ -60,11 +94,35 @@ Live configuration files are read from and written to:
 <BlueStacks data directory>\Engine\UserData\InputMapper\UserFiles\<package>.cfg
 ```
 
-When replacing an existing live file, the editor creates a backup beside it using a name such as:
+Wrapper settings are saved separately beside the installed wrapper DLL:
 
 ```text
-<package>.cfg.bak.20260621-143000
+<BlueStacks data directory>\Engine\UserData\dinput8-config.json
 ```
+
+When replacing an existing live file, the editor creates or overwrites one backup beside it:
+
+```text
+<package>.cfg.bak
+```
+
+Wrapper settings use the same rolling backup pattern:
+
+```text
+dinput8-config.json.bak
+```
+
+## Wrapper
+
+The native BlueStacks wrapper source is included in:
+
+```text
+BlueStacksDInputWrapper\
+```
+
+Build that project first when you need a fresh `dinput8.dll`; the editor build copies
+`BlueStacksDInputWrapper\x64\Release\dinput8.dll` into its output and publish folders
+when the DLL exists.
 
 ## Limitations
 

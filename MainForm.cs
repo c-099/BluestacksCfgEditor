@@ -1,5 +1,6 @@
 using System.Drawing.Drawing2D;
 using System.Globalization;
+using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -19,23 +20,29 @@ internal sealed class MainForm : Form
     private readonly Label _typeInfoLabel = new();
     private readonly TextBox _advancedJsonTextBox = new();
     private readonly Button _applyAdvancedJsonButton = new();
+    private readonly Button _openLiveButton = new();
+    private readonly Button _saveToLiveButton = new();
     private readonly ContextMenuStrip _schemeContextMenu = new();
     private readonly Dictionary<string, FieldEditor> _commonEditors = new(StringComparer.Ordinal);
     private readonly Dictionary<string, FieldEditor> _typeEditors = new(StringComparer.Ordinal);
     private readonly List<PreviewMarker> _previewMarkers = [];
 
     private JsonObject? _document;
+    private JsonObject _wrapperSettings = ConfigService.CreateDefaultWrapperSettings();
     private string? _configPath;
+    private string? _wrapperConfigPath;
     private int _selectedSchemeIndex;
     private int _selectedControlIndex;
     private bool _isLoadingUi;
     private bool _isClosing;
+    private bool _liveFunctionalityEnabled = true;
     private RectangleF _previewBounds;
 
     internal MainForm()
     {
         InitializeComponent();
         FormClosing += (_, _) => _isClosing = true;
+        Shown += (_, _) => BeginInvoke(PerformStartupEnvironmentChecks);
         BuildFieldTables();
         TryUpdateLivePathStatus();
         LoadEmptyState();
@@ -75,8 +82,14 @@ internal sealed class MainForm : Form
         Button openConfigButton = CreateToolbarButton("Open Config", (_, _) => RunUiAction(OpenConfig, "Open Failed"));
         Button saveAsButton = CreateToolbarButton("Save As", (_, _) => RunUiAction(SaveAs, "Save Failed"));
         Button wrapperSettingsButton = CreateToolbarButton("Wrapper Settings", (_, _) => RunUiAction(OpenWrapperSettings, "Wrapper Settings Failed"));
-        Button openLiveButton = CreateToolbarButton("Open Live", (_, _) => RunUiAction(OpenLiveConfig, "Open Live Failed"));
-        Button saveToLiveButton = CreateToolbarButton("Save To Live", (_, _) => RunUiAction(SaveToLive, "Live Save Failed"));
+        _openLiveButton.Text = "Open Live";
+        _openLiveButton.AutoSize = true;
+        _openLiveButton.Margin = new Padding(4, 2, 4, 2);
+        _openLiveButton.Click += (_, _) => RunUiAction(OpenLiveConfig, "Open Live Failed");
+        _saveToLiveButton.Text = "Save To Live";
+        _saveToLiveButton.AutoSize = true;
+        _saveToLiveButton.Margin = new Padding(4, 2, 4, 2);
+        _saveToLiveButton.Click += (_, _) => RunUiAction(SaveToLive, "Live Save Failed");
 
         toolbar.Controls.Add(openConfigButton);
         toolbar.Controls.Add(saveAsButton);
@@ -114,8 +127,8 @@ internal sealed class MainForm : Form
             }
         };
         toolbar.Controls.Add(_packageComboBox);
-        toolbar.Controls.Add(openLiveButton);
-        toolbar.Controls.Add(saveToLiveButton);
+        toolbar.Controls.Add(_openLiveButton);
+        toolbar.Controls.Add(_saveToLiveButton);
 
         _statusLabel.AutoSize = false;
         _statusLabel.Dock = DockStyle.Fill;
@@ -152,7 +165,7 @@ internal sealed class MainForm : Form
         _schemeListBox.Dock = DockStyle.Fill;
         _schemeListBox.IntegralHeight = false;
         _schemeListBox.SelectedIndexChanged += (_, _) => OnSchemeSelectionChanged();
-        _schemeListBox.MouseDoubleClick += (_, e) => RunUiAction(() => SelectSchemeForConfig(e.Location), "Select Scheme Failed");
+        _schemeListBox.MouseDoubleClick += (_, e) => RunUiAction(() => SelectSchemeForConfigAndSaveLive(e.Location), "Select Scheme Failed");
         _schemeListBox.MouseDown += (_, e) => SelectSchemeItemUnderMouse(e);
         ConfigureSchemeContextMenu();
         _schemeListBox.ContextMenuStrip = _schemeContextMenu;
@@ -245,6 +258,154 @@ internal sealed class MainForm : Form
         ResumeLayout(performLayout: true);
 
         Shown += (_, _) => BeginInvoke(() => ConfigureInitialSplitterLayout(bodySplit));
+    }
+
+    private void PerformStartupEnvironmentChecks()
+    {
+        SuggestMoveToBlueStacksUserDataFolder();
+        if (_isClosing || IsDisposed)
+        {
+            return;
+        }
+
+        EnsureWrapperInstalledOrDisableLiveFunctionality();
+    }
+
+    private void SuggestMoveToBlueStacksUserDataFolder()
+    {
+        if (ConfigService.IsCurrentEditorInExpectedFolder())
+        {
+            return;
+        }
+
+        string expectedFolder = ConfigService.GetBlueStacksUserDataFolder();
+        DialogResult result = MessageBox.Show(
+            this,
+            $"BluestacksCfgEditor is not running from the BlueStacks user data folder:\n\n{expectedFolder}\n\nCopy it there and launch the copied editor now?",
+            "Move Editor",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Information);
+
+        if (result != DialogResult.Yes)
+        {
+            return;
+        }
+
+        try
+        {
+            string copiedEditorPath = ConfigService.CopyEditorToExpectedFolder();
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = copiedEditorPath,
+                UseShellExecute = true,
+                WorkingDirectory = Path.GetDirectoryName(copiedEditorPath) ?? expectedFolder,
+            });
+            Close();
+        }
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
+        {
+            MessageBox.Show(
+                this,
+                $"Could not copy the editor to the BlueStacks user data folder.\n\n{ex.Message}",
+                "Move Editor Failed",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
+        }
+    }
+
+    private void EnsureWrapperInstalledOrDisableLiveFunctionality()
+    {
+        string installedWrapperPath = ConfigService.GetInstalledWrapperDllPath();
+        if (File.Exists(installedWrapperPath))
+        {
+            return;
+        }
+
+        string sourceWrapperPath = ConfigService.GetBundledWrapperDllPath();
+        if (!File.Exists(sourceWrapperPath))
+        {
+            DisableLiveFunctionality($"Live functionality disabled: wrapper source not found at {sourceWrapperPath}");
+            MessageBox.Show(
+                this,
+                $"The BlueStacks wrapper is not installed:\n\n{installedWrapperPath}\n\nThe source dinput8.dll was also not found beside the editor:\n\n{sourceWrapperPath}\n\nLive functionality is disabled for this session.",
+                "Wrapper Missing",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+            return;
+        }
+
+        DialogResult result = MessageBox.Show(
+            this,
+            $"The BlueStacks wrapper is not installed:\n\n{installedWrapperPath}\n\nCopy it now with administrator privileges?\n\nChoose No to run the config editor without live functionality.",
+            "Install Wrapper",
+            MessageBoxButtons.YesNo,
+            MessageBoxIcon.Question);
+
+        if (result == DialogResult.Yes)
+        {
+            StartElevatedWrapperCopy(sourceWrapperPath, installedWrapperPath);
+            return;
+        }
+
+        DisableLiveFunctionality("Live functionality disabled: wrapper is not installed.");
+    }
+
+    private void StartElevatedWrapperCopy(string sourceWrapperPath, string installedWrapperPath)
+    {
+        string batchPath = Path.Combine(Path.GetTempPath(), $"install-bluestacks-wrapper-{Guid.NewGuid():N}.bat");
+        string batchText = $"""
+            @echo off
+            setlocal
+            set "SRC={sourceWrapperPath}"
+            set "DST={installedWrapperPath}"
+            if not exist "%SRC%" (
+                echo Source wrapper DLL was not found:
+                echo %SRC%
+                pause
+                exit /b 2
+            )
+            copy /Y "%SRC%" "%DST%"
+            if errorlevel 1 (
+                echo Failed to copy wrapper DLL to:
+                echo %DST%
+                pause
+                exit /b 1
+            )
+            echo Wrapper DLL installed:
+            echo %DST%
+            exit /b 0
+            """;
+
+        File.WriteAllText(batchPath, batchText);
+        try
+        {
+            Process.Start(new ProcessStartInfo
+            {
+                FileName = batchPath,
+                UseShellExecute = true,
+                Verb = "runas",
+                WorkingDirectory = Path.GetDirectoryName(installedWrapperPath) ?? AppContext.BaseDirectory,
+            });
+            SetStatus($"Wrapper install requested: {installedWrapperPath}");
+        }
+        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+        {
+            DisableLiveFunctionality("Live functionality disabled: wrapper install was cancelled or failed to start.");
+            MessageBox.Show(
+                this,
+                $"Could not start the administrator copy command.\n\n{ex.Message}",
+                "Wrapper Install Failed",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
+        }
+    }
+
+    private void DisableLiveFunctionality(string status)
+    {
+        _liveFunctionalityEnabled = false;
+        _openLiveButton.Enabled = false;
+        _saveToLiveButton.Enabled = false;
+        SetStatus(status);
     }
 
     private static Button CreateToolbarButton(string text, EventHandler onClick) =>
@@ -475,6 +636,12 @@ internal sealed class MainForm : Form
 
     private void OpenLiveConfig()
     {
+        if (!_liveFunctionalityEnabled)
+        {
+            MessageBox.Show(this, "Live functionality is disabled because the BlueStacks wrapper is not installed.", "Live Disabled", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
         string livePath;
         try
         {
@@ -500,12 +667,14 @@ internal sealed class MainForm : Form
         JsonObject document = ConfigService.LoadConfig(path);
         _document = document;
         _configPath = path;
+        _wrapperSettings = ConfigService.LoadWrapperSettings(document);
+        _wrapperConfigPath = ConfigService.GetWrapperConfigPath();
         _selectedSchemeIndex = 0;
         _selectedControlIndex = 0;
         RefreshSchemeList();
         RefreshControlList();
         LoadSelectedControlIntoUi();
-        SetStatus($"Loaded {path}");
+        SetStatus($"Loaded {path}; wrapper settings: {_wrapperConfigPath}");
     }
 
     private void SaveAs()
@@ -529,12 +698,22 @@ internal sealed class MainForm : Form
             return;
         }
 
+        string wrapperPath = ConfigService.GetWrapperConfigPath();
         ConfigService.SaveConfig(_document, dialog.FileName);
-        SetStatus($"Saved {dialog.FileName}");
+        ConfigService.SaveWrapperSettings(_wrapperSettings, wrapperPath);
+        _configPath = dialog.FileName;
+        _wrapperConfigPath = wrapperPath;
+        SetStatus($"Saved {dialog.FileName}; wrapper settings: {wrapperPath}");
     }
 
     private void SaveToLive()
     {
+        if (!_liveFunctionalityEnabled)
+        {
+            MessageBox.Show(this, "Live functionality is disabled because the BlueStacks wrapper is not installed.", "Live Disabled", MessageBoxButtons.OK, MessageBoxIcon.Information);
+            return;
+        }
+
         if (_document is null)
         {
             MessageBox.Show(this, "Open a config file first.", "Nothing To Save", MessageBoxButtons.OK, MessageBoxIcon.Information);
@@ -557,9 +736,7 @@ internal sealed class MainForm : Form
 
         try
         {
-            LiveSaveResult result = ConfigService.SaveToLive(_document, packageName);
-            string backupSuffix = result.BackupPath is null ? string.Empty : $" (backup: {Path.GetFileName(result.BackupPath)})";
-            SetStatus($"Saved live config: {result.LivePath}{backupSuffix}; reload requested");
+            SaveToLive(packageName, "Saved live config");
         }
         catch (DirectoryNotFoundException ex)
         {
@@ -569,6 +746,21 @@ internal sealed class MainForm : Form
         {
             MessageBox.Show(this, ex.Message, "Invalid KMM Config", MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
+    }
+
+    private void SaveToLive(string packageName, string statusPrefix)
+    {
+        if (_document is null)
+        {
+            throw new InvalidOperationException("Open a config file first.");
+        }
+
+        LiveSaveResult result = ConfigService.SaveToLive(_document, _wrapperSettings, packageName);
+        string backupSuffix = result.BackupPath is null ? string.Empty : $" (backup: {Path.GetFileName(result.BackupPath)})";
+        string wrapperBackupSuffix = result.WrapperBackupPath is null ? string.Empty : $" (backup: {Path.GetFileName(result.WrapperBackupPath)})";
+        _configPath = result.LivePath;
+        _wrapperConfigPath = result.WrapperPath;
+        SetStatus($"{statusPrefix}: {result.LivePath}{backupSuffix}; wrapper settings: {result.WrapperPath}{wrapperBackupSuffix}; reload requested");
     }
 
     private void RefreshSchemeList()
@@ -897,10 +1089,13 @@ internal sealed class MainForm : Form
             return;
         }
 
-        using WrapperSettingsForm dialog = new(_document);
+        using WrapperSettingsForm dialog = new(_wrapperSettings);
         if (dialog.ShowDialog(this) == DialogResult.OK)
         {
-            SetStatus("Updated wrapper settings");
+            string wrapperPath = _wrapperConfigPath ?? (_configPath is null
+                ? "not saved yet"
+                : ConfigService.GetWrapperConfigPath());
+            SetStatus($"Updated wrapper settings: {wrapperPath}");
         }
     }
 
@@ -1024,6 +1219,56 @@ internal sealed class MainForm : Form
         }
 
         SelectSchemeForConfig(clickedIndex);
+    }
+
+    private void SelectSchemeForConfigAndSaveLive(Point location)
+    {
+        int clickedIndex = _schemeListBox.IndexFromPoint(location);
+        if (clickedIndex < 0 || clickedIndex >= _schemeListBox.Items.Count)
+        {
+            return;
+        }
+
+        SelectSchemeForConfig(clickedIndex);
+
+        if (!_liveFunctionalityEnabled)
+        {
+            SetStatus("Selected scheme for config. Live save skipped because the wrapper is not installed.");
+            return;
+        }
+
+        if (_document is null)
+        {
+            return;
+        }
+
+        string packageName = _packageComboBox.Text.Trim();
+        if (string.IsNullOrWhiteSpace(packageName))
+        {
+            MessageBox.Show(this, "Package name is empty.", "Invalid Package", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+
+        string? validationError = ConfigService.ValidateForLiveSave(_document);
+        if (validationError is not null)
+        {
+            MessageBox.Show(this, validationError, "Invalid KMM Config", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            return;
+        }
+
+        string schemeName = GetSelectedScheme()?["Name"]?.GetValue<string?>() ?? "Unnamed scheme";
+        try
+        {
+            SaveToLive(packageName, $"Selected scheme for config and saved live: {schemeName}");
+        }
+        catch (DirectoryNotFoundException ex)
+        {
+            MessageBox.Show(this, ex.Message, "Live Folder Not Found", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        catch (InvalidDataException ex)
+        {
+            MessageBox.Show(this, ex.Message, "Invalid KMM Config", MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
     }
 
     private void SelectCurrentSchemeForConfig()
@@ -1317,7 +1562,9 @@ internal sealed class MainForm : Form
     private void LoadEmptyState()
     {
         _document = null;
+        _wrapperSettings = ConfigService.CreateDefaultWrapperSettings();
         _configPath = null;
+        _wrapperConfigPath = null;
         _selectedSchemeIndex = 0;
         _selectedControlIndex = 0;
         _schemeListBox.Items.Clear();
@@ -1481,6 +1728,15 @@ internal sealed class MainForm : Form
         catch (InvalidDataException ex)
         {
             MessageBox.Show(this, ex.Message, title, MessageBoxButtons.OK, MessageBoxIcon.Error);
+        }
+        catch (UnauthorizedAccessException ex)
+        {
+            MessageBox.Show(
+                this,
+                $"Windows denied access to a protected BlueStacks path.\n\n{ex.Message}\n\nRestart BlueStacks CFG Editor as administrator and try again.",
+                title,
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Error);
         }
         catch (Exception ex)
         {

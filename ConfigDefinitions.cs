@@ -21,7 +21,8 @@ internal sealed record WrapperSettingDefinition(string Name, double DefaultValue
 internal static class ConfigDefinitions
 {
     internal const string DefaultPackage = "com.supercell.brawlstars";
-    internal const string WrapperConfigKey = "DInputWrapper";
+    internal const string LegacyWrapperConfigKey = "DInputWrapper";
+    internal const string WrapperConfigFileName = "dinput8-config.json";
 
     internal static readonly JsonSerializerOptions JsonOptions = new()
     {
@@ -107,13 +108,14 @@ internal static class ConfigDefinitions
 
     internal static readonly IReadOnlyList<WrapperSettingDefinition> WrapperSettings =
     [
+        new("gDebugConsoleEnabled", 0.0),
         new("gMOBASkillEdgeThresholdPercent", 25.0),
         new("gMOBASkillMaxAimXBiasPercent", 1.5),
         new("gMOBASkillLeftEdgeXPercent", 9.8),
         new("gMOBASkillRightEdgeXPercent", 90.2),
         new("gMOBASkillAimYBiasScaleStartPercent", 12.0),
         new("gMOBASkillAimYBiasScaleEndPercent", 30.0),
-        new("gMOBASkillAimYBiasMinScale", 0.4),
+        new("gMOBASkillAimYBiasMinScale", -1.0),
         new("gDpadFullExtensionEnabled", 1.0),
         new("gDpadDirectionSmoothingFactor", 0.45),
         new("gDpadZeroHoldMs", 80.0),
