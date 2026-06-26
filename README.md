@@ -55,16 +55,19 @@ artifacts\release\BluestacksCfgEditor-v<version>-win-x64.zip
 
 ## Usage
 
-Place the release files together before running the editor:
+Extract the release anywhere and keep the application files together:
 
 ```text
-<BlueStacks data directory>\Engine\UserData\BluestacksCfgEditor.exe
-<BlueStacks data directory>\Engine\UserData\dinput8.dll
+<release folder>\BluestacksCfgEditor.exe
+<release folder>\dinput8.dll
 ```
 
-If you start `BluestacksCfgEditor.exe` from another folder, it will offer to
-copy itself and the bundled `dinput8.dll` into the BlueStacks user data folder
-and relaunch from there.
+On startup, the editor creates the wrapper settings file under the BlueStacks
+user data folder when it does not already exist:
+
+```text
+<BlueStacks data directory>\Engine\UserData\dinput8-config.json
+```
 
 The wrapper DLL must also be installed in the BlueStacks application folder for
 live functionality:
@@ -74,7 +77,23 @@ live functionality:
 ```
 
 The editor prompts to copy it there with administrator approval when it is
-missing.
+missing or does not match the bundled wrapper.
+
+The release zip also includes my personal Brawl Stars control config:
+
+```text
+com.supercell.brawlstars.cfg
+```
+
+You can import it directly in BlueStacks controls editor, 
+
+or **Open Config** then **Save To Live** with `BluestacksCfgEditor`, 
+
+or manually copy it to:
+
+```text
+<BlueStacks data directory>\Engine\UserData\InputMapper\UserFiles\com.supercell.brawlstars.cfg
+```
 
 1. Select **Open Config** to edit an existing `.cfg` or `.json` file, or select **Open Live** to load the configuration for the package shown in the package field.
 2. Choose a control scheme and control from the left panel.

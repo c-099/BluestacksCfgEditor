@@ -1,4 +1,5 @@
 using System.Globalization;
+using System.Security.Cryptography;
 using System.Text;
 using System.Text.Json;
 using System.Text.Json.Nodes;
@@ -24,7 +25,7 @@ internal static class ConfigService
         SaveJsonObject(document, path);
     }
 
-    internal static LiveSaveResult SaveToLive(JsonObject document, JsonObject wrapperSettings, string packageName)
+    internal static LiveSaveResult SaveToLive(JsonObject document, string packageName)
     {
         string? validationError = ValidateForLiveSave(document);
         if (validationError is not null)
@@ -42,25 +43,16 @@ internal static class ConfigService
         }
 
         string? backupPath = null;
-        string wrapperPath = GetWrapperConfigPath();
-        string? wrapperBackupPath = null;
         if (File.Exists(livePath))
         {
             backupPath = $"{livePath}.bak";
             File.Copy(livePath, backupPath, overwrite: true);
         }
 
-        if (File.Exists(wrapperPath))
-        {
-            wrapperBackupPath = $"{wrapperPath}.bak";
-            File.Copy(wrapperPath, wrapperBackupPath, overwrite: true);
-        }
-
         SaveConfig(document, livePath);
-        SaveWrapperSettings(wrapperSettings, wrapperPath);
         WriteReloadMarker(livePath);
 
-        return new LiveSaveResult(livePath, backupPath, wrapperPath, wrapperBackupPath);
+        return new LiveSaveResult(livePath, backupPath);
     }
 
     internal static string? ValidateForLiveSave(JsonObject document)
@@ -124,6 +116,21 @@ internal static class ConfigService
             ConfigDefinitions.WrapperConfigFileName);
     }
 
+    internal static WrapperConfigEnsureResult EnsureWrapperConfigExists()
+    {
+        string userDataFolder = GetBlueStacksUserDataFolder();
+        Directory.CreateDirectory(userDataFolder);
+
+        string wrapperPath = GetWrapperConfigPath();
+        if (File.Exists(wrapperPath))
+        {
+            return new WrapperConfigEnsureResult(wrapperPath, Created: false);
+        }
+
+        SaveWrapperSettings(CreateDefaultWrapperSettings(), wrapperPath);
+        return new WrapperConfigEnsureResult(wrapperPath, Created: true);
+    }
+
     internal static string GetBlueStacksUserDataFolder()
     {
         return Path.Combine(
@@ -168,55 +175,20 @@ internal static class ConfigService
         return Path.Combine(AppContext.BaseDirectory, "dinput8.dll");
     }
 
-    internal static string GetCurrentEditorExecutablePath()
+    internal static bool FilesAreIdentical(string firstPath, string secondPath)
     {
-        return Environment.ProcessPath
-            ?? Application.ExecutablePath;
-    }
-
-    internal static string GetExpectedEditorExecutablePath()
-    {
-        return Path.Combine(
-            GetBlueStacksUserDataFolder(),
-            Path.GetFileName(GetCurrentEditorExecutablePath()));
-    }
-
-    internal static bool IsCurrentEditorInExpectedFolder()
-    {
-        string actualFolder = Path.GetFullPath(AppContext.BaseDirectory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        string expectedFolder = Path.GetFullPath(GetBlueStacksUserDataFolder()).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar);
-        return string.Equals(actualFolder, expectedFolder, StringComparison.OrdinalIgnoreCase);
-    }
-
-    internal static string CopyEditorToExpectedFolder()
-    {
-        string sourceExe = GetCurrentEditorExecutablePath();
-        string destinationFolder = GetBlueStacksUserDataFolder();
-        Directory.CreateDirectory(destinationFolder);
-
-        string destinationExe = Path.Combine(destinationFolder, Path.GetFileName(sourceExe));
-        if (!string.Equals(Path.GetFullPath(sourceExe), Path.GetFullPath(destinationExe), StringComparison.OrdinalIgnoreCase))
+        FileInfo first = new(firstPath);
+        FileInfo second = new(secondPath);
+        if (first.Length != second.Length)
         {
-            File.Copy(sourceExe, destinationExe, overwrite: true);
+            return false;
         }
 
-        string bundledWrapperDll = GetBundledWrapperDllPath();
-        if (File.Exists(bundledWrapperDll))
-        {
-            File.Copy(
-                bundledWrapperDll,
-                Path.Combine(destinationFolder, "dinput8.dll"),
-                overwrite: true);
-        }
-
-        string sourceWrapperConfig = Path.Combine(AppContext.BaseDirectory, ConfigDefinitions.WrapperConfigFileName);
-        string destinationWrapperConfig = GetWrapperConfigPath();
-        if (File.Exists(sourceWrapperConfig) && !File.Exists(destinationWrapperConfig))
-        {
-            File.Copy(sourceWrapperConfig, destinationWrapperConfig, overwrite: false);
-        }
-
-        return destinationExe;
+        using FileStream firstStream = File.OpenRead(firstPath);
+        using FileStream secondStream = File.OpenRead(secondPath);
+        byte[] firstHash = SHA256.HashData(firstStream);
+        byte[] secondHash = SHA256.HashData(secondStream);
+        return CryptographicOperations.FixedTimeEquals(firstHash, secondHash);
     }
 
     internal static IReadOnlyList<string> DiscoverLivePackages()
@@ -276,6 +248,27 @@ internal static class ConfigService
         EnsureWrapperSettingDefaults(wrapperSettings);
         NormalizeWrapperSettings(wrapperSettings);
         File.WriteAllText(path, SerializeDocument(wrapperSettings), Utf8NoBom);
+    }
+
+    internal static WrapperSaveResult SaveWrapperSettingsToLive(JsonObject wrapperSettings, string? packageName)
+    {
+        string wrapperPath = GetWrapperConfigPath();
+        string? backupPath = null;
+        if (File.Exists(wrapperPath))
+        {
+            backupPath = $"{wrapperPath}.bak";
+            File.Copy(wrapperPath, backupPath, overwrite: true);
+        }
+
+        SaveWrapperSettings(wrapperSettings, wrapperPath);
+
+        string? reloadPath = null;
+        if (!string.IsNullOrWhiteSpace(packageName))
+        {
+            reloadPath = WriteReloadMarker(GetLiveConfigPath(packageName));
+        }
+
+        return new WrapperSaveResult(wrapperPath, backupPath, reloadPath);
     }
 
     internal static void RemoveEmbeddedWrapperSettings(JsonObject document)
@@ -410,14 +403,19 @@ internal static class ConfigService
             ?? throw new InvalidDataException("The wrapper config root must be a JSON object.");
     }
 
-    private static void WriteReloadMarker(string livePath)
+    private static string WriteReloadMarker(string livePath)
     {
         string reloadPath = $"{livePath}.reload";
         File.WriteAllText(
             reloadPath,
             DateTime.Now.ToString("O", CultureInfo.InvariantCulture),
             Utf8NoBom);
+        return reloadPath;
     }
 }
 
-internal sealed record LiveSaveResult(string LivePath, string? BackupPath, string WrapperPath, string? WrapperBackupPath);
+internal sealed record LiveSaveResult(string LivePath, string? BackupPath);
+
+internal sealed record WrapperSaveResult(string WrapperPath, string? BackupPath, string? ReloadPath);
+
+internal sealed record WrapperConfigEnsureResult(string WrapperPath, bool Created);

@@ -262,52 +262,28 @@ internal sealed class MainForm : Form
 
     private void PerformStartupEnvironmentChecks()
     {
-        SuggestMoveToBlueStacksUserDataFolder();
-        if (_isClosing || IsDisposed)
-        {
-            return;
-        }
-
+        EnsureWrapperConfigExists();
         EnsureWrapperInstalledOrDisableLiveFunctionality();
     }
 
-    private void SuggestMoveToBlueStacksUserDataFolder()
+    private void EnsureWrapperConfigExists()
     {
-        if (ConfigService.IsCurrentEditorInExpectedFolder())
-        {
-            return;
-        }
-
-        string expectedFolder = ConfigService.GetBlueStacksUserDataFolder();
-        DialogResult result = MessageBox.Show(
-            this,
-            $"BluestacksCfgEditor is not running from the BlueStacks user data folder:\n\n{expectedFolder}\n\nCopy it there and launch the copied editor now?",
-            "Move Editor",
-            MessageBoxButtons.YesNo,
-            MessageBoxIcon.Information);
-
-        if (result != DialogResult.Yes)
-        {
-            return;
-        }
-
         try
         {
-            string copiedEditorPath = ConfigService.CopyEditorToExpectedFolder();
-            Process.Start(new ProcessStartInfo
+            WrapperConfigEnsureResult result = ConfigService.EnsureWrapperConfigExists();
+            _wrapperConfigPath = result.WrapperPath;
+            if (result.Created)
             {
-                FileName = copiedEditorPath,
-                UseShellExecute = true,
-                WorkingDirectory = Path.GetDirectoryName(copiedEditorPath) ?? expectedFolder,
-            });
-            Close();
+                _wrapperSettings = ConfigService.LoadWrapperSettings(_document ?? []);
+                SetStatus($"Created wrapper settings: {result.WrapperPath}");
+            }
         }
-        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or InvalidOperationException)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or DirectoryNotFoundException)
         {
             MessageBox.Show(
                 this,
-                $"Could not copy the editor to the BlueStacks user data folder.\n\n{ex.Message}",
-                "Move Editor Failed",
+                $"Could not create the BlueStacks wrapper settings file.\n\n{ConfigService.GetWrapperConfigPath()}\n\n{ex.Message}",
+                "Wrapper Settings Failed",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Error);
         }
@@ -316,11 +292,6 @@ internal sealed class MainForm : Form
     private void EnsureWrapperInstalledOrDisableLiveFunctionality()
     {
         string installedWrapperPath = ConfigService.GetInstalledWrapperDllPath();
-        if (File.Exists(installedWrapperPath))
-        {
-            return;
-        }
-
         string sourceWrapperPath = ConfigService.GetBundledWrapperDllPath();
         if (!File.Exists(sourceWrapperPath))
         {
@@ -334,10 +305,38 @@ internal sealed class MainForm : Form
             return;
         }
 
+        bool installedWrapperExists = File.Exists(installedWrapperPath);
+        if (installedWrapperExists)
+        {
+            try
+            {
+                if (ConfigService.FilesAreIdentical(installedWrapperPath, sourceWrapperPath))
+                {
+                    return;
+                }
+            }
+            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
+            {
+                DisableLiveFunctionality("Live functionality disabled: installed wrapper could not be read for version check.");
+                MessageBox.Show(
+                    this,
+                    $"The installed BlueStacks wrapper could not be read for the version check:\n\n{installedWrapperPath}\n\n{ex.Message}",
+                    "Wrapper Check Failed",
+                    MessageBoxButtons.OK,
+                    MessageBoxIcon.Warning);
+                return;
+            }
+        }
+
+        string promptText = installedWrapperExists
+            ? $"The installed BlueStacks wrapper does not match the dinput8.dll beside the editor:\n\nInstalled:\n{installedWrapperPath}\n\nBundled:\n{sourceWrapperPath}\n\nCopy the bundled wrapper over the installed one with administrator privileges?\n\nChoose No to run the config editor without live functionality."
+            : $"The BlueStacks wrapper is not installed:\n\n{installedWrapperPath}\n\nCopy it now with administrator privileges?\n\nChoose No to run the config editor without live functionality.";
+        string promptTitle = installedWrapperExists ? "Update Wrapper" : "Install Wrapper";
+
         DialogResult result = MessageBox.Show(
             this,
-            $"The BlueStacks wrapper is not installed:\n\n{installedWrapperPath}\n\nCopy it now with administrator privileges?\n\nChoose No to run the config editor without live functionality.",
-            "Install Wrapper",
+            promptText,
+            promptTitle,
             MessageBoxButtons.YesNo,
             MessageBoxIcon.Question);
 
@@ -347,7 +346,9 @@ internal sealed class MainForm : Form
             return;
         }
 
-        DisableLiveFunctionality("Live functionality disabled: wrapper is not installed.");
+        DisableLiveFunctionality(installedWrapperExists
+            ? "Live functionality disabled: installed wrapper does not match the bundled wrapper."
+            : "Live functionality disabled: wrapper is not installed.");
     }
 
     private void StartElevatedWrapperCopy(string sourceWrapperPath, string installedWrapperPath)
@@ -698,12 +699,9 @@ internal sealed class MainForm : Form
             return;
         }
 
-        string wrapperPath = ConfigService.GetWrapperConfigPath();
         ConfigService.SaveConfig(_document, dialog.FileName);
-        ConfigService.SaveWrapperSettings(_wrapperSettings, wrapperPath);
         _configPath = dialog.FileName;
-        _wrapperConfigPath = wrapperPath;
-        SetStatus($"Saved {dialog.FileName}; wrapper settings: {wrapperPath}");
+        SetStatus($"Saved {dialog.FileName}");
     }
 
     private void SaveToLive()
@@ -755,12 +753,10 @@ internal sealed class MainForm : Form
             throw new InvalidOperationException("Open a config file first.");
         }
 
-        LiveSaveResult result = ConfigService.SaveToLive(_document, _wrapperSettings, packageName);
+        LiveSaveResult result = ConfigService.SaveToLive(_document, packageName);
         string backupSuffix = result.BackupPath is null ? string.Empty : $" (backup: {Path.GetFileName(result.BackupPath)})";
-        string wrapperBackupSuffix = result.WrapperBackupPath is null ? string.Empty : $" (backup: {Path.GetFileName(result.WrapperBackupPath)})";
         _configPath = result.LivePath;
-        _wrapperConfigPath = result.WrapperPath;
-        SetStatus($"{statusPrefix}: {result.LivePath}{backupSuffix}; wrapper settings: {result.WrapperPath}{wrapperBackupSuffix}; reload requested");
+        SetStatus($"{statusPrefix}: {result.LivePath}{backupSuffix}; reload requested");
     }
 
     private void RefreshSchemeList()
@@ -1083,19 +1079,16 @@ internal sealed class MainForm : Form
 
     private void OpenWrapperSettings()
     {
-        if (_document is null)
-        {
-            MessageBox.Show(this, "Open a config file first.", "No Config Loaded", MessageBoxButtons.OK, MessageBoxIcon.Information);
-            return;
-        }
-
+        _wrapperSettings = ConfigService.LoadWrapperSettings(_document ?? []);
         using WrapperSettingsForm dialog = new(_wrapperSettings);
         if (dialog.ShowDialog(this) == DialogResult.OK)
         {
-            string wrapperPath = _wrapperConfigPath ?? (_configPath is null
-                ? "not saved yet"
-                : ConfigService.GetWrapperConfigPath());
-            SetStatus($"Updated wrapper settings: {wrapperPath}");
+            string packageName = _packageComboBox.Text.Trim();
+            WrapperSaveResult result = ConfigService.SaveWrapperSettingsToLive(_wrapperSettings, packageName);
+            string backupSuffix = result.BackupPath is null ? string.Empty : $" (backup: {Path.GetFileName(result.BackupPath)})";
+            string reloadSuffix = result.ReloadPath is null ? "; reload not requested because no package is selected" : $"; reload requested: {result.ReloadPath}";
+            _wrapperConfigPath = result.WrapperPath;
+            SetStatus($"Applied wrapper settings: {result.WrapperPath}{backupSuffix}{reloadSuffix}");
         }
     }
 

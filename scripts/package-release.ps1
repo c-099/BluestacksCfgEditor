@@ -83,6 +83,11 @@ Copy-Item -LiteralPath (Join-Path $RepoRoot "README.md") -Destination (Join-Path
 Copy-Item -LiteralPath (Join-Path $RepoRoot "LICENSE") -Destination (Join-Path $StageDir "LICENSE") -Force
 Copy-Item -LiteralPath (Join-Path $RepoRoot "BlueStacksDInputWrapper\README.md") -Destination (Join-Path $StageDir "WRAPPER-README.md") -Force
 
+$BrawlStarsConfig = Join-Path $RepoRoot "publish\com.supercell.brawlstars.cfg"
+if (Test-Path -LiteralPath $BrawlStarsConfig) {
+    Copy-Item -LiteralPath $BrawlStarsConfig -Destination (Join-Path $StageDir "com.supercell.brawlstars.cfg") -Force
+}
+
 if (Test-Path -LiteralPath $ZipPath) {
     Remove-Item -LiteralPath $ZipPath -Force
 }
