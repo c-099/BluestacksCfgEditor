@@ -76,10 +76,12 @@ DpadHandleKeyEventFn pOriginalDpadHandleKeyEvent = nullptr;
 typedef __int64(__fastcall *DpadUpdateVirtualJoystickTouchFn)(void*, char);
 DpadUpdateVirtualJoystickTouchFn pDpadUpdateVirtualJoystickTouch = nullptr;
 
+void ReportHookResolutionError(const char* targetName, const char* detail);
+
 // Replacement for HD-Player's Imgd color marker matcher.
 // This intentionally keeps the working runtime behavior from the original
 // patch, even where it differs from the cleaner Ghidra decompile.
-uint8_t CustomMatcher(ImgdState* state, int mode, short* outIdx, int p4, uint32_t mc) {
+uint8_t CustomMatcherImpl(ImgdState* state, int mode, short* outIdx, int p4, uint32_t mc) {
     // Low-risk safety guards. Do not add the Ghidra-only flag/mode guards here
     // without testing; those changed behavior in a way that broke detection.
     if (!state || !outIdx) return 0;
@@ -155,13 +157,22 @@ uint8_t CustomMatcher(ImgdState* state, int mode, short* outIdx, int p4, uint32_
     return 0;
 }
 
+uint8_t CustomMatcher(ImgdState* state, int mode, short* outIdx, int p4, uint32_t mc) {
+    __try {
+        return CustomMatcherImpl(state, mode, outIdx, p4, mc);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ReportHookResolutionError("Imgd_FindColorMarkerTriangle", "The hook hit an exception while reading the updated runtime layout.");
+        return 0;
+    }
+}
+
 // ========================================================================
 // 3. BRAWL STARS MOBASKILL AIM COMPENSATION
 // ========================================================================
-constexpr uintptr_t kMOBASkillComputeAimCoordsRva = 0x39B530;
-constexpr uintptr_t kDpadHandleGamepadAnalogMoveRva = 0xCC1A80;
-constexpr uintptr_t kDpadHandleKeyEventRva = 0xCC1D90;
-constexpr uintptr_t kDpadUpdateVirtualJoystickTouchRva = 0xCC16E0;
+constexpr uintptr_t kMOBASkillComputeAimCoordsRva = 0x3C5690;
+constexpr uintptr_t kDpadHandleGamepadAnalogMoveRva = 0xCED010;
+constexpr uintptr_t kDpadHandleKeyEventRva = 0xCED320;
+constexpr uintptr_t kDpadUpdateVirtualJoystickTouchRva = 0xCECC70;
 constexpr double kMOBASkillScreenPercentMax = 100.0;
 double gMOBASkillEdgeThresholdPercent = 25.0;
 double gMOBASkillMaxAimXBiasPercent = 1.5;
@@ -179,6 +190,7 @@ DWORD gDpadLastDebugPrintTick = 0;
 DWORD gDpadKeyboardLastDebugPrintTick = 0;
 bool gDebugConsoleEnabled = false;
 bool gDebugConsoleAttached = false;
+bool gHookResolutionErrorShown = false;
 
 struct DpadStickSmoothingState {
     bool hasDirection = false;
@@ -239,6 +251,26 @@ void UpdateDebugConsoleVisibility() {
         DebugPrint("BlueStacks dinput8 hook debug console detached\n");
         FreeConsole();
         gDebugConsoleAttached = false;
+    }
+}
+
+void ReportHookResolutionError(const char* targetName, const char* detail) {
+    char buf[512] = {};
+    sprintf_s(
+        buf,
+        "BlueStacks dinput8 hook: failed to resolve %s. %s\n"
+        "The affected wrapper feature will be disabled to avoid crashing BlueStacks.",
+        targetName,
+        detail ? detail : "");
+    DebugPrint("%s\n", buf);
+
+    if (!gHookResolutionErrorShown) {
+        gHookResolutionErrorShown = true;
+        MessageBoxA(
+            nullptr,
+            buf,
+            "BlueStacks wrapper offset mismatch",
+            MB_OK | MB_ICONERROR | MB_SETFOREGROUND);
     }
 }
 
@@ -316,7 +348,7 @@ bool NormalizeAndSmoothAnalogPair(
 // Brawl Stars movement needs the stick endpoint on the outer circle whenever
 // movement is nonzero, so this normalizes the temporary analog state before the
 // original handler computes and emits the virtual touch.
-__int64 __fastcall CustomDpadHandleGamepadAnalogMove(
+__int64 __fastcall CustomDpadHandleGamepadAnalogMoveImpl(
     void* runtime,
     int analogChannel,
     float* analogState) {
@@ -369,6 +401,19 @@ __int64 __fastcall CustomDpadHandleGamepadAnalogMove(
     return pOriginalDpadHandleGamepadAnalogMove(runtime, analogChannel, normalizedAnalogState);
 }
 
+__int64 __fastcall CustomDpadHandleGamepadAnalogMove(
+    void* runtime,
+    int analogChannel,
+    float* analogState) {
+
+    __try {
+        return CustomDpadHandleGamepadAnalogMoveImpl(runtime, analogChannel, analogState);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ReportHookResolutionError("ImapRtDpad_handleGamepadAnalogMove", "The hook hit an exception while handling the updated runtime layout.");
+        return 0;
+    }
+}
+
 bool IsNonZeroDpadOffset(double xOffset, double yOffset) {
     return std::fabs(xOffset) > 0.0001 || std::fabs(yOffset) > 0.0001;
 }
@@ -376,7 +421,7 @@ bool IsNonZeroDpadOffset(double xOffset, double yOffset) {
 // Hook for HD-Player's normal ImapRtDpad keyboard path. The original handler
 // already computes full-radius offsets for WASD directions, so this only
 // bridges brief zero-direction samples that can happen while changing keys.
-__int64 __fastcall CustomDpadHandleKeyEvent(
+__int64 __fastcall CustomDpadHandleKeyEventImpl(
     void* runtime,
     __int64 keyEvent,
     int eventKind) {
@@ -430,12 +475,25 @@ __int64 __fastcall CustomDpadHandleKeyEvent(
     return result;
 }
 
+__int64 __fastcall CustomDpadHandleKeyEvent(
+    void* runtime,
+    __int64 keyEvent,
+    int eventKind) {
+
+    __try {
+        return CustomDpadHandleKeyEventImpl(runtime, keyEvent, eventKind);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ReportHookResolutionError("ImapRtDpad_handleKeyEvent", "The hook hit an exception while handling the updated runtime layout.");
+        return 0;
+    }
+}
+
 // Hook for HD-Player's ImapMOBASkillComputeAimCoords. The original function
 // computes the virtual skill-stick endpoint from mouse coordinates. After the
 // original math runs, this nudges only the X endpoint when the character is
 // close to a horizontal screen edge. Near the left edge, compensate left;
 // near the right edge, compensate right.
-void CustomMOBASkillComputeAimCoords(
+void CustomMOBASkillComputeAimCoordsImpl(
     void* skillRuntime,
     int mouseX,
     int mouseY,
@@ -540,6 +598,21 @@ void CustomMOBASkillComputeAimCoords(
     }
 }
 
+void CustomMOBASkillComputeAimCoords(
+    void* skillRuntime,
+    int mouseX,
+    int mouseY,
+    double* outAimX,
+    double* outAimY,
+    char clampToDeadzone) {
+
+    __try {
+        CustomMOBASkillComputeAimCoordsImpl(skillRuntime, mouseX, mouseY, outAimX, outAimY, clampToDeadzone);
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ReportHookResolutionError("ImapRtMOBASkill_computeAimCoords", "The hook hit an exception while handling the updated runtime layout.");
+    }
+}
+
 uintptr_t FindPattern(HMODULE hMod, const std::vector<int>& pattern) {
     if (!hMod || pattern.empty()) return 0;
 
@@ -563,6 +636,17 @@ uintptr_t FindPattern(HMODULE hMod, const std::vector<int>& pattern) {
     return 0;
 }
 
+bool IsRvaInsideModule(HMODULE hMod, uintptr_t rva);
+
+uintptr_t ResolveFunction(HMODULE hMod, const std::vector<int>& pattern, uintptr_t fallbackRva) {
+    uintptr_t found = FindPattern(hMod, pattern);
+    if (found) return found;
+    DebugPrint("Signature resolution failed; fallback RVA 0x%p inside module=%d\n",
+        reinterpret_cast<void*>(fallbackRva),
+        static_cast<int>(IsRvaInsideModule(hMod, fallbackRva)));
+    return 0;
+}
+
 bool IsRvaInsideModule(HMODULE hMod, uintptr_t rva) {
     if (!hMod) return false;
 
@@ -575,10 +659,10 @@ bool IsRvaInsideModule(HMODULE hMod, uintptr_t rva) {
 // ========================================================================
 // 4. LIVE KMM CFG RELOAD
 // ========================================================================
-constexpr uintptr_t kKmmImportSchemesFromJsonPayloadRva = 0x404C10;
-constexpr uintptr_t kKmmLoadPackageCfgRva = 0x3D1200;
-constexpr uintptr_t kKmmSetActiveCfgRva = 0x3D84B0;
-constexpr uintptr_t kKmmDestroyCfgRva = 0x3C9B60;
+constexpr uintptr_t kKmmImportSchemesFromJsonPayloadRva = 0x404A50;
+constexpr uintptr_t kKmmLoadPackageCfgRva = 0x3F9F80;
+constexpr uintptr_t kKmmSetActiveCfgRva = 0x402610;
+constexpr uintptr_t kKmmDestroyCfgRva = 0x3F3CC0;
 constexpr const char* kBrawlStarsPackageName = "com.supercell.brawlstars";
 constexpr const char* kQByteArrayCtorDataSize =
     "??0QByteArray@@QEAA@PEBD_J@Z";
@@ -773,17 +857,40 @@ bool ReloadBrawlStarsCfg(HMODULE hdPlayerModule, const std::string& cfgPath) {
     if (!IsRvaInsideModule(hdPlayerModule, kKmmLoadPackageCfgRva) ||
         !IsRvaInsideModule(hdPlayerModule, kKmmSetActiveCfgRva) ||
         !IsRvaInsideModule(hdPlayerModule, kKmmDestroyCfgRva)) {
-        DebugPrint("KMM live reload: one or more KMM reload RVAs are outside HD-Player image\n");
+        ReportHookResolutionError("KMM live reload", "One or more KMM reload fallback RVAs are outside the HD-Player image.");
         return false;
     }
 
     std::string packageName = kBrawlStarsPackageName;
-    auto loadPackageCfgFn = reinterpret_cast<KmmLoadPackageCfgFn>(
-        reinterpret_cast<uintptr_t>(hdPlayerModule) + kKmmLoadPackageCfgRva);
-    auto setActiveCfgFn = reinterpret_cast<KmmSetActiveCfgFn>(
-        reinterpret_cast<uintptr_t>(hdPlayerModule) + kKmmSetActiveCfgRva);
-    auto destroyCfgFn = reinterpret_cast<KmmDestroyCfgFn>(
-        reinterpret_cast<uintptr_t>(hdPlayerModule) + kKmmDestroyCfgRva);
+    std::vector<int> loadPackageCfgSig = {
+        0x48, 0x89, 0x5c, 0x24, -1, 0x48, 0x89, 0x74, 0x24, -1, 0x55, 0x57, 0x41, 0x54, 0x41, 0x56, 0x41, 0x57,
+        0x48, 0x8d, 0x6c, 0x24, -1, 0x48, 0x81, 0xec, 0xe0, 0x00, 0x00, 0x00, 0x48, 0x8b, 0x05, -1, -1, -1, -1,
+        0x48, 0x33, 0xc4, 0x48, 0x89, 0x45, -1, 0x48, 0x8b, 0xf2
+    };
+    std::vector<int> setActiveCfgSig = {
+        0x48, 0x89, 0x5c, 0x24, -1, 0x48, 0x89, 0x6c, 0x24, -1, 0x48, 0x89, 0x74, 0x24, -1, 0x57,
+        0x48, 0x81, 0xec, 0xe0, 0x00, 0x00, 0x00, 0x48, 0x8b, 0x05, -1, -1, -1, -1,
+        0x48, 0x33, 0xc4, 0x48, 0x89, 0x84, 0x24, -1, -1, -1, -1, 0x48, 0x8b, 0xf9
+    };
+    uintptr_t loadPackageCfgAddr = ResolveFunction(hdPlayerModule, loadPackageCfgSig, kKmmLoadPackageCfgRva);
+    uintptr_t setActiveCfgAddr = ResolveFunction(hdPlayerModule, setActiveCfgSig, kKmmSetActiveCfgRva);
+    uintptr_t destroyCfgAddr = reinterpret_cast<uintptr_t>(hdPlayerModule) + kKmmDestroyCfgRva;
+    if (!loadPackageCfgAddr) {
+        ReportHookResolutionError("Kmm_loadPackageCfg", "Signature and fallback RVA resolution both failed.");
+        return false;
+    }
+    if (!setActiveCfgAddr) {
+        ReportHookResolutionError("Kmm_setActiveCfg", "Signature and fallback RVA resolution both failed.");
+        return false;
+    }
+    if (!IsRvaInsideModule(hdPlayerModule, kKmmDestroyCfgRva) || !destroyCfgAddr) {
+        ReportHookResolutionError("Kmm_destroyCfg", "Fallback RVA is outside the HD-Player image.");
+        return false;
+    }
+
+    auto loadPackageCfgFn = reinterpret_cast<KmmLoadPackageCfgFn>(loadPackageCfgAddr);
+    auto setActiveCfgFn = reinterpret_cast<KmmSetActiveCfgFn>(setActiveCfgAddr);
+    auto destroyCfgFn = reinterpret_cast<KmmDestroyCfgFn>(destroyCfgAddr);
 
     alignas(16) unsigned char cfgStorage[240] = {};
     LoadWrapperSettings(cfgPath);
@@ -856,11 +963,16 @@ DWORD WINAPI MainThread(LPVOID lpReserved) {
 
     HMODULE hMod = nullptr;
     uintptr_t targetFunc = 0;
+    bool matcherResolutionReported = false;
 
     while (!targetFunc) {
         hMod = GetModuleHandleA("HD-Player.exe");
         if (hMod) {
             targetFunc = FindPattern(hMod, sig);
+            if (!targetFunc && !matcherResolutionReported) {
+                matcherResolutionReported = true;
+                ReportHookResolutionError("Imgd_FindColorMarkerTriangle", "Matcher signature was not found.");
+            }
         }
 
         if (!targetFunc) {
@@ -884,50 +996,78 @@ DWORD WINAPI MainThread(LPVOID lpReserved) {
         }
 
         if (IsRvaInsideModule(hMod, kMOBASkillComputeAimCoordsRva)) {
-            uintptr_t aimFunc = reinterpret_cast<uintptr_t>(hMod) + kMOBASkillComputeAimCoordsRva;
-            status = MH_CreateHook(
-                reinterpret_cast<void*>(aimFunc),
-                &CustomMOBASkillComputeAimCoords,
-                reinterpret_cast<void**>(&pOriginalMOBASkillComputeAimCoords));
-            if (status != MH_OK) {
-                LogHookError("MH_CreateHook CustomMOBASkillComputeAimCoords", status);
+            std::vector<int> aimSig = {
+                0x48, 0x8b, 0xc4, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57,
+                0x48, 0x8d, 0xa8, -1, -1, -1, -1, 0x48, 0x81, 0xec, 0xa8, 0x01, 0x00, 0x00
+            };
+            uintptr_t aimFunc = ResolveFunction(hMod, aimSig, kMOBASkillComputeAimCoordsRva);
+            if (!aimFunc) {
+                ReportHookResolutionError("ImapRtMOBASkill_computeAimCoords", "Signature and fallback RVA resolution both failed.");
             } else {
-                DebugPrint("MOBASkill aim hook created at 0x%p\n", reinterpret_cast<void*>(aimFunc));
+                status = MH_CreateHook(
+                    reinterpret_cast<void*>(aimFunc),
+                    &CustomMOBASkillComputeAimCoords,
+                    reinterpret_cast<void**>(&pOriginalMOBASkillComputeAimCoords));
+                if (status != MH_OK) {
+                    LogHookError("MH_CreateHook CustomMOBASkillComputeAimCoords", status);
+                } else {
+                    DebugPrint("MOBASkill aim hook created at 0x%p\n", reinterpret_cast<void*>(aimFunc));
+                }
             }
         } else {
-            OutputDebugStringA("BlueStacks dinput8 hook: MOBASkill RVA is outside HD-Player image\n");
+            ReportHookResolutionError("ImapRtMOBASkill_computeAimCoords", "Fallback RVA is outside the HD-Player image.");
         }
 
         if (IsRvaInsideModule(hMod, kDpadHandleGamepadAnalogMoveRva)) {
-            uintptr_t dpadAnalogFunc = reinterpret_cast<uintptr_t>(hMod) + kDpadHandleGamepadAnalogMoveRva;
-            status = MH_CreateHook(
-                reinterpret_cast<void*>(dpadAnalogFunc),
-                &CustomDpadHandleGamepadAnalogMove,
-                reinterpret_cast<void**>(&pOriginalDpadHandleGamepadAnalogMove));
-            if (status != MH_OK) {
-                LogHookError("MH_CreateHook CustomDpadHandleGamepadAnalogMove", status);
+            std::vector<int> dpadAnalogSig = {
+                0x48, 0x8b, 0xc4, 0x53, 0x55, 0x56, 0x57, 0x48, 0x83, 0xec, 0x78
+            };
+            uintptr_t dpadAnalogFunc = ResolveFunction(hMod, dpadAnalogSig, kDpadHandleGamepadAnalogMoveRva);
+            if (!dpadAnalogFunc) {
+                ReportHookResolutionError("ImapRtDpad_handleGamepadAnalogMove", "Signature and fallback RVA resolution both failed.");
             } else {
-                DebugPrint(
-                    "Dpad analog full-extension hook created at 0x%p enabled=%d smoothing=%.2f zeroHoldMs=%.0f\n",
+                status = MH_CreateHook(
                     reinterpret_cast<void*>(dpadAnalogFunc),
-                    static_cast<int>(gDpadFullExtensionEnabled),
-                    gDpadDirectionSmoothingFactor,
-                    gDpadZeroHoldMs);
+                    &CustomDpadHandleGamepadAnalogMove,
+                    reinterpret_cast<void**>(&pOriginalDpadHandleGamepadAnalogMove));
+                if (status != MH_OK) {
+                    LogHookError("MH_CreateHook CustomDpadHandleGamepadAnalogMove", status);
+                } else {
+                    DebugPrint(
+                        "Dpad analog full-extension hook created at 0x%p enabled=%d smoothing=%.2f zeroHoldMs=%.0f\n",
+                        reinterpret_cast<void*>(dpadAnalogFunc),
+                        static_cast<int>(gDpadFullExtensionEnabled),
+                        gDpadDirectionSmoothingFactor,
+                        gDpadZeroHoldMs);
+                }
             }
         } else {
-            OutputDebugStringA("BlueStacks dinput8 hook: Dpad analog RVA is outside HD-Player image\n");
+            ReportHookResolutionError("ImapRtDpad_handleGamepadAnalogMove", "Fallback RVA is outside the HD-Player image.");
         }
 
         if (IsRvaInsideModule(hMod, kDpadUpdateVirtualJoystickTouchRva)) {
+            std::vector<int> dpadUpdateSig = {
+                0x48, 0x89, 0x5c, 0x24, -1, 0x48, 0x89, 0x74, 0x24, -1, 0x57, 0x48, 0x83, 0xec, 0x20, 0x8b, 0x81
+            };
             pDpadUpdateVirtualJoystickTouch = reinterpret_cast<DpadUpdateVirtualJoystickTouchFn>(
-                reinterpret_cast<uintptr_t>(hMod) + kDpadUpdateVirtualJoystickTouchRva);
-            DebugPrint("Dpad virtual joystick update function resolved at 0x%p\n", reinterpret_cast<void*>(pDpadUpdateVirtualJoystickTouch));
+                ResolveFunction(hMod, dpadUpdateSig, kDpadUpdateVirtualJoystickTouchRva));
+            if (!pDpadUpdateVirtualJoystickTouch) {
+                ReportHookResolutionError("ImapRtDpad_updateVirtualJoystickTouch", "Signature and fallback RVA resolution both failed.");
+            } else {
+                DebugPrint("Dpad virtual joystick update function resolved at 0x%p\n", reinterpret_cast<void*>(pDpadUpdateVirtualJoystickTouch));
+            }
         } else {
-            OutputDebugStringA("BlueStacks dinput8 hook: Dpad update RVA is outside HD-Player image\n");
+            ReportHookResolutionError("ImapRtDpad_updateVirtualJoystickTouch", "Fallback RVA is outside the HD-Player image.");
         }
 
         if (IsRvaInsideModule(hMod, kDpadHandleKeyEventRva)) {
-            uintptr_t dpadKeyFunc = reinterpret_cast<uintptr_t>(hMod) + kDpadHandleKeyEventRva;
+            std::vector<int> dpadKeySig = {
+                0x48, 0x8b, 0xc4, 0x48, 0x89, 0x58, -1, 0x44, 0x89, 0x40
+            };
+            uintptr_t dpadKeyFunc = ResolveFunction(hMod, dpadKeySig, kDpadHandleKeyEventRva);
+            if (!dpadKeyFunc) {
+                ReportHookResolutionError("ImapRtDpad_handleKeyEvent", "Signature and fallback RVA resolution both failed.");
+            } else {
             status = MH_CreateHook(
                 reinterpret_cast<void*>(dpadKeyFunc),
                 &CustomDpadHandleKeyEvent,
@@ -941,8 +1081,9 @@ DWORD WINAPI MainThread(LPVOID lpReserved) {
                     static_cast<int>(gDpadFullExtensionEnabled),
                     gDpadKeyboardZeroHoldMs);
             }
+            }
         } else {
-            OutputDebugStringA("BlueStacks dinput8 hook: Dpad key RVA is outside HD-Player image\n");
+            ReportHookResolutionError("ImapRtDpad_handleKeyEvent", "Fallback RVA is outside the HD-Player image.");
         }
 
         status = MH_EnableHook(MH_ALL_HOOKS);

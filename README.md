@@ -17,7 +17,7 @@ A Windows desktop editor for BlueStacks 5 `.cfg` game-control mapping files.
 - Edits wrapper settings in a separate `dinput8-config.json` file under the BlueStacks user data folder
 - Saves to a separate file or directly to the live BlueStacks configuration
 - Keeps one rolling `.bak` backup before overwriting an existing live configuration
-- Bundles the BlueStacks `dinput8.dll` wrapper and can install it with administrator approval
+- Bundles the BlueStacks `dinput8.dll` wrapper with install and uninstall batch scripts
 
 ## Requirements
 
@@ -76,8 +76,9 @@ live functionality:
 <BlueStacks install directory>\dinput8.dll
 ```
 
-The editor prompts to copy it there with administrator approval when it is
-missing or does not match the bundled wrapper.
+Run `install-wrapper.bat` from the release folder to install or update the
+wrapper. Run `uninstall-wrapper.bat` to remove it. The editor only warns when
+the wrapper is missing or does not match the bundled wrapper.
 
 The release zip also includes my personal Brawl Stars control config:
 

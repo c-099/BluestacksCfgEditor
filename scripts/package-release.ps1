@@ -82,6 +82,8 @@ Get-ChildItem -LiteralPath $PublishDir -Filter "*.pdb" -File -ErrorAction Silent
 Copy-Item -LiteralPath (Join-Path $RepoRoot "README.md") -Destination (Join-Path $StageDir "README.md") -Force
 Copy-Item -LiteralPath (Join-Path $RepoRoot "LICENSE") -Destination (Join-Path $StageDir "LICENSE") -Force
 Copy-Item -LiteralPath (Join-Path $RepoRoot "BlueStacksDInputWrapper\README.md") -Destination (Join-Path $StageDir "WRAPPER-README.md") -Force
+Copy-Item -LiteralPath (Join-Path $RepoRoot "install-wrapper.bat") -Destination (Join-Path $StageDir "install-wrapper.bat") -Force
+Copy-Item -LiteralPath (Join-Path $RepoRoot "uninstall-wrapper.bat") -Destination (Join-Path $StageDir "uninstall-wrapper.bat") -Force
 
 $BrawlStarsConfig = Join-Path $RepoRoot "publish\com.supercell.brawlstars.cfg"
 if (Test-Path -LiteralPath $BrawlStarsConfig) {

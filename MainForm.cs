@@ -1,6 +1,5 @@
 using System.Drawing.Drawing2D;
 using System.Globalization;
-using System.Diagnostics;
 using System.Text.Json;
 using System.Text.Json.Nodes;
 
@@ -306,99 +305,44 @@ internal sealed class MainForm : Form
         }
 
         bool installedWrapperExists = File.Exists(installedWrapperPath);
-        if (installedWrapperExists)
+        if (!installedWrapperExists)
         {
-            try
-            {
-                if (ConfigService.FilesAreIdentical(installedWrapperPath, sourceWrapperPath))
-                {
-                    return;
-                }
-            }
-            catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
-            {
-                DisableLiveFunctionality("Live functionality disabled: installed wrapper could not be read for version check.");
-                MessageBox.Show(
-                    this,
-                    $"The installed BlueStacks wrapper could not be read for the version check:\n\n{installedWrapperPath}\n\n{ex.Message}",
-                    "Wrapper Check Failed",
-                    MessageBoxButtons.OK,
-                    MessageBoxIcon.Warning);
-                return;
-            }
-        }
-
-        string promptText = installedWrapperExists
-            ? $"The installed BlueStacks wrapper does not match the dinput8.dll beside the editor:\n\nInstalled:\n{installedWrapperPath}\n\nBundled:\n{sourceWrapperPath}\n\nCopy the bundled wrapper over the installed one with administrator privileges?\n\nChoose No to run the config editor without live functionality."
-            : $"The BlueStacks wrapper is not installed:\n\n{installedWrapperPath}\n\nCopy it now with administrator privileges?\n\nChoose No to run the config editor without live functionality.";
-        string promptTitle = installedWrapperExists ? "Update Wrapper" : "Install Wrapper";
-
-        DialogResult result = MessageBox.Show(
-            this,
-            promptText,
-            promptTitle,
-            MessageBoxButtons.YesNo,
-            MessageBoxIcon.Question);
-
-        if (result == DialogResult.Yes)
-        {
-            StartElevatedWrapperCopy(sourceWrapperPath, installedWrapperPath);
+            DisableLiveFunctionality("Live functionality disabled: wrapper is not installed.");
+            MessageBox.Show(
+                this,
+                $"The BlueStacks wrapper is not installed:\n\n{installedWrapperPath}\n\nRun install-wrapper.bat from the release folder to install it, then restart the editor.\n\nLive functionality is disabled for this session.",
+                "Wrapper Missing",
+                MessageBoxButtons.OK,
+                MessageBoxIcon.Warning);
             return;
         }
 
-        DisableLiveFunctionality(installedWrapperExists
-            ? "Live functionality disabled: installed wrapper does not match the bundled wrapper."
-            : "Live functionality disabled: wrapper is not installed.");
-    }
-
-    private void StartElevatedWrapperCopy(string sourceWrapperPath, string installedWrapperPath)
-    {
-        string batchPath = Path.Combine(Path.GetTempPath(), $"install-bluestacks-wrapper-{Guid.NewGuid():N}.bat");
-        string batchText = $"""
-            @echo off
-            setlocal
-            set "SRC={sourceWrapperPath}"
-            set "DST={installedWrapperPath}"
-            if not exist "%SRC%" (
-                echo Source wrapper DLL was not found:
-                echo %SRC%
-                pause
-                exit /b 2
-            )
-            copy /Y "%SRC%" "%DST%"
-            if errorlevel 1 (
-                echo Failed to copy wrapper DLL to:
-                echo %DST%
-                pause
-                exit /b 1
-            )
-            echo Wrapper DLL installed:
-            echo %DST%
-            exit /b 0
-            """;
-
-        File.WriteAllText(batchPath, batchText);
         try
         {
-            Process.Start(new ProcessStartInfo
+            if (ConfigService.FilesAreIdentical(installedWrapperPath, sourceWrapperPath))
             {
-                FileName = batchPath,
-                UseShellExecute = true,
-                Verb = "runas",
-                WorkingDirectory = Path.GetDirectoryName(installedWrapperPath) ?? AppContext.BaseDirectory,
-            });
-            SetStatus($"Wrapper install requested: {installedWrapperPath}");
+                return;
+            }
         }
-        catch (Exception ex) when (ex is InvalidOperationException or System.ComponentModel.Win32Exception)
+        catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            DisableLiveFunctionality("Live functionality disabled: wrapper install was cancelled or failed to start.");
+            DisableLiveFunctionality("Live functionality disabled: installed wrapper could not be read for version check.");
             MessageBox.Show(
                 this,
-                $"Could not start the administrator copy command.\n\n{ex.Message}",
-                "Wrapper Install Failed",
+                $"The installed BlueStacks wrapper could not be read for the version check:\n\n{installedWrapperPath}\n\n{ex.Message}",
+                "Wrapper Check Failed",
                 MessageBoxButtons.OK,
                 MessageBoxIcon.Warning);
+            return;
         }
+
+        DisableLiveFunctionality("Live functionality disabled: installed wrapper does not match the bundled wrapper.");
+        MessageBox.Show(
+            this,
+            $"The installed BlueStacks wrapper does not match the bundled wrapper:\n\nInstalled:\n{installedWrapperPath}\n\nBundled:\n{sourceWrapperPath}\n\nRun install-wrapper.bat from the release folder to update it, then restart the editor.\n\nLive functionality is disabled for this session.",
+            "Wrapper Update Needed",
+            MessageBoxButtons.OK,
+            MessageBoxIcon.Warning);
     }
 
     private void DisableLiveFunctionality(string status)

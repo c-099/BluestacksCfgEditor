@@ -20,8 +20,9 @@ Stars input fixes controlled by the editor.
   watching the config JSON directly. When the marker is created or touched, the
   wrapper reloads the Brawl Stars config from disk; this avoids accidental
   reload loops from BlueStacks writing the config as part of its own apply path.
-- The editor bundles a built `dinput8.dll` and can install it into the
-  BlueStacks application folder with administrator approval.
+- The editor release bundles a built `dinput8.dll` plus `install-wrapper.bat`
+  and `uninstall-wrapper.bat` for managing it in the BlueStacks application
+  folder.
 
 ## Fixed Color Matcher
 
