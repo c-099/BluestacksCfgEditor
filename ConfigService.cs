@@ -370,13 +370,14 @@ internal static class ConfigService
 
     private static void SaveJsonObject(JsonObject document, string path)
     {
+        string serializedDocument = SerializeDocument(document);
         string tempPath = Path.Combine(
             Path.GetDirectoryName(path) ?? AppContext.BaseDirectory,
             $"{Path.GetFileName(path)}.{Guid.NewGuid():N}.tmp");
 
         try
         {
-            File.WriteAllText(tempPath, SerializeDocument(document), Utf8NoBom);
+            File.WriteAllText(tempPath, serializedDocument, Utf8NoBom);
 
             if (File.Exists(path))
             {
@@ -393,6 +394,17 @@ internal static class ConfigService
             {
                 File.Delete(tempPath);
             }
+        }
+
+        VerifySavedJson(path, serializedDocument);
+    }
+
+    private static void VerifySavedJson(string path, string expectedJson)
+    {
+        string actualJson = File.ReadAllText(path, Encoding.UTF8);
+        if (!string.Equals(actualJson, expectedJson, StringComparison.Ordinal))
+        {
+            throw new IOException($"The saved config did not match the editor document after writing: {path}");
         }
     }
 

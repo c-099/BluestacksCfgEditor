@@ -7,6 +7,12 @@ namespace BluestacksCfgEditor;
 
 internal sealed class MainForm : Form
 {
+    private const int WmClose = 0x0010;
+    private const int WmNcLButtonDown = 0x00A1;
+    private const int WmSysCommand = 0x0112;
+    private const int HtClose = 20;
+    private const int ScClose = 0xF060;
+
     private readonly ComboBox _packageComboBox = new();
     private readonly Label _statusLabel = new();
     private readonly ListBox _schemeListBox = new();
@@ -35,13 +41,23 @@ internal sealed class MainForm : Form
     private bool _isLoadingUi;
     private bool _isClosing;
     private bool _liveFunctionalityEnabled = true;
+    private FieldEditor? _pendingFieldEditor;
+    private bool _advancedJsonDirty;
     private RectangleF _previewBounds;
+
+    private bool IsShuttingDown => _isClosing || IsDisposed || Disposing;
 
     internal MainForm()
     {
         InitializeComponent();
-        FormClosing += (_, _) => _isClosing = true;
-        Shown += (_, _) => BeginInvoke(PerformStartupEnvironmentChecks);
+        FormClosing += OnMainFormClosing;
+        Shown += (_, _) => BeginInvoke(() =>
+        {
+            if (!IsShuttingDown)
+            {
+                PerformStartupEnvironmentChecks();
+            }
+        });
         BuildFieldTables();
         TryUpdateLivePathStatus();
         LoadEmptyState();
@@ -112,7 +128,7 @@ internal sealed class MainForm : Form
         _packageComboBox.SelectionChangeCommitted += (_, _) => TryUpdateLivePathStatus();
         _packageComboBox.Leave += (_, _) =>
         {
-            if (!_isClosing)
+            if (!IsShuttingDown)
             {
                 TryUpdateLivePathStatus();
             }
@@ -245,6 +261,13 @@ internal sealed class MainForm : Form
         _advancedJsonTextBox.AcceptsTab = true;
         _advancedJsonTextBox.ScrollBars = ScrollBars.Both;
         _advancedJsonTextBox.WordWrap = false;
+        _advancedJsonTextBox.TextChanged += (_, _) =>
+        {
+            if (!_isLoadingUi)
+            {
+                _advancedJsonDirty = true;
+            }
+        };
         advancedLayout.Controls.Add(_advancedJsonTextBox, 0, 0);
         _applyAdvancedJsonButton.Text = "Apply JSON To Selected Control";
         _applyAdvancedJsonButton.AutoSize = true;
@@ -256,12 +279,45 @@ internal sealed class MainForm : Form
 
         ResumeLayout(performLayout: true);
 
-        Shown += (_, _) => BeginInvoke(() => ConfigureInitialSplitterLayout(bodySplit));
+        Shown += (_, _) => BeginInvoke(() =>
+        {
+            if (!IsShuttingDown)
+            {
+                ConfigureInitialSplitterLayout(bodySplit);
+            }
+        });
+    }
+
+    private void OnMainFormClosing(object? sender, FormClosingEventArgs e)
+    {
+        _isClosing = true;
+    }
+
+    protected override void WndProc(ref Message m)
+    {
+        if (m.Msg == WmClose ||
+            (m.Msg == WmNcLButtonDown && (int)m.WParam == HtClose) ||
+            (m.Msg == WmSysCommand && ((int)m.WParam & 0xFFF0) == ScClose))
+        {
+            _isClosing = true;
+        }
+
+        base.WndProc(ref m);
     }
 
     private void PerformStartupEnvironmentChecks()
     {
+        if (IsShuttingDown)
+        {
+            return;
+        }
+
         EnsureWrapperConfigExists();
+        if (IsShuttingDown)
+        {
+            return;
+        }
+
         EnsureWrapperInstalledOrDisableLiveFunctionality();
     }
 
@@ -279,41 +335,29 @@ internal sealed class MainForm : Form
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException or DirectoryNotFoundException)
         {
-            MessageBox.Show(
-                this,
-                $"Could not create the BlueStacks wrapper settings file.\n\n{ConfigService.GetWrapperConfigPath()}\n\n{ex.Message}",
-                "Wrapper Settings Failed",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Error);
+            SetStatus($"Wrapper settings failed: {ConfigService.GetWrapperConfigPath()} ({ex.Message})");
         }
     }
 
     private void EnsureWrapperInstalledOrDisableLiveFunctionality()
     {
+        if (IsShuttingDown)
+        {
+            return;
+        }
+
         string installedWrapperPath = ConfigService.GetInstalledWrapperDllPath();
         string sourceWrapperPath = ConfigService.GetBundledWrapperDllPath();
         if (!File.Exists(sourceWrapperPath))
         {
-            DisableLiveFunctionality($"Live functionality disabled: wrapper source not found at {sourceWrapperPath}");
-            MessageBox.Show(
-                this,
-                $"The BlueStacks wrapper is not installed:\n\n{installedWrapperPath}\n\nThe source dinput8.dll was also not found beside the editor:\n\n{sourceWrapperPath}\n\nLive functionality is disabled for this session.",
-                "Wrapper Missing",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Warning);
+            SetStatus($"Live config editing enabled; bundled wrapper source not found at {sourceWrapperPath}");
             return;
         }
 
         bool installedWrapperExists = File.Exists(installedWrapperPath);
         if (!installedWrapperExists)
         {
-            DisableLiveFunctionality("Live functionality disabled: wrapper is not installed.");
-            MessageBox.Show(
-                this,
-                $"The BlueStacks wrapper is not installed:\n\n{installedWrapperPath}\n\nRun install-wrapper.bat from the release folder to install it, then restart the editor.\n\nLive functionality is disabled for this session.",
-                "Wrapper Missing",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Warning);
+            SetStatus($"Live config editing enabled; wrapper is not installed at {installedWrapperPath}");
             return;
         }
 
@@ -326,27 +370,20 @@ internal sealed class MainForm : Form
         }
         catch (Exception ex) when (ex is IOException or UnauthorizedAccessException)
         {
-            DisableLiveFunctionality("Live functionality disabled: installed wrapper could not be read for version check.");
-            MessageBox.Show(
-                this,
-                $"The installed BlueStacks wrapper could not be read for the version check:\n\n{installedWrapperPath}\n\n{ex.Message}",
-                "Wrapper Check Failed",
-                MessageBoxButtons.OK,
-                MessageBoxIcon.Warning);
+            SetStatus($"Live config editing enabled; installed wrapper could not be read ({ex.Message})");
             return;
         }
 
-        DisableLiveFunctionality("Live functionality disabled: installed wrapper does not match the bundled wrapper.");
-        MessageBox.Show(
-            this,
-            $"The installed BlueStacks wrapper does not match the bundled wrapper:\n\nInstalled:\n{installedWrapperPath}\n\nBundled:\n{sourceWrapperPath}\n\nRun install-wrapper.bat from the release folder to update it, then restart the editor.\n\nLive functionality is disabled for this session.",
-            "Wrapper Update Needed",
-            MessageBoxButtons.OK,
-            MessageBoxIcon.Warning);
+        SetStatus("Live config editing enabled; installed wrapper does not match the bundled wrapper.");
     }
 
     private void DisableLiveFunctionality(string status)
     {
+        if (IsShuttingDown)
+        {
+            return;
+        }
+
         _liveFunctionalityEnabled = false;
         _openLiveButton.Enabled = false;
         _saveToLiveButton.Enabled = false;
@@ -510,7 +547,13 @@ internal sealed class MainForm : Form
                     Anchor = AnchorStyles.Left,
                     Margin = new Padding(0, 4, 0, 0),
                 };
-                checkBox.CheckedChanged += (_, _) => onCommit(new FieldEditor(definition, checkBox));
+                checkBox.CheckedChanged += (_, _) =>
+                {
+                    if (!IsShuttingDown)
+                    {
+                        onCommit(new FieldEditor(definition, checkBox));
+                    }
+                };
                 editorControl = checkBox;
                 break;
             case FieldKind.StringList:
@@ -524,13 +567,22 @@ internal sealed class MainForm : Form
                     Dock = DockStyle.Fill,
                     Margin = new Padding(0, 4, 0, 0),
                 };
-                listTextBox.Leave += (_, _) => onCommit(new FieldEditor(definition, listTextBox));
+                listTextBox.Leave += (_, _) =>
+                {
+                    if (!IsShuttingDown)
+                    {
+                        onCommit(new FieldEditor(definition, listTextBox));
+                    }
+                };
                 listTextBox.KeyDown += (_, e) =>
                 {
                     if (e.KeyCode == Keys.Enter && !e.Shift)
                     {
                         e.SuppressKeyPress = true;
-                        onCommit(new FieldEditor(definition, listTextBox));
+                        if (!IsShuttingDown)
+                        {
+                            onCommit(new FieldEditor(definition, listTextBox));
+                        }
                     }
                 };
                 editorControl = listTextBox;
@@ -541,19 +593,35 @@ internal sealed class MainForm : Form
                     Dock = DockStyle.Top,
                     Margin = new Padding(0, 4, 0, 0),
                 };
-                textBox.Leave += (_, _) => onCommit(new FieldEditor(definition, textBox));
+                textBox.Leave += (_, _) =>
+                {
+                    if (!IsShuttingDown)
+                    {
+                        onCommit(new FieldEditor(definition, textBox));
+                    }
+                };
                 textBox.KeyDown += (_, e) =>
                 {
                     if (e.KeyCode == Keys.Enter)
                     {
                         e.SuppressKeyPress = true;
-                        onCommit(new FieldEditor(definition, textBox));
+                        if (!IsShuttingDown)
+                        {
+                            onCommit(new FieldEditor(definition, textBox));
+                        }
                     }
                 };
                 editorControl = textBox;
                 break;
         }
 
+        editorControl.Enter += (_, _) =>
+        {
+            if (!IsShuttingDown)
+            {
+                _pendingFieldEditor = new FieldEditor(definition, editorControl);
+            }
+        };
         table.Controls.Add(editorControl, editorColumn, row);
         if (editorColumnSpan > 1)
         {
@@ -630,6 +698,11 @@ internal sealed class MainForm : Form
             return;
         }
 
+        if (!CommitPendingEditorsForSave())
+        {
+            return;
+        }
+
         using SaveFileDialog dialog = new()
         {
             Title = "Save Config As",
@@ -661,6 +734,13 @@ internal sealed class MainForm : Form
             MessageBox.Show(this, "Open a config file first.", "Nothing To Save", MessageBoxButtons.OK, MessageBoxIcon.Information);
             return;
         }
+
+        if (!CommitPendingEditorsForSave())
+        {
+            return;
+        }
+
+        MarkCurrentSchemeSelectedForLiveSave();
 
         string packageName = _packageComboBox.Text.Trim();
         if (string.IsNullOrWhiteSpace(packageName))
@@ -820,6 +900,7 @@ internal sealed class MainForm : Form
                 ClearEditors(_commonEditors.Values);
                 ClearEditors(_typeEditors.Values);
                 _advancedJsonTextBox.Clear();
+                _advancedJsonDirty = false;
                 _previewPanel.Invalidate();
                 return;
             }
@@ -829,6 +910,7 @@ internal sealed class MainForm : Form
             RebuildTypeEditorSection(control["Type"]?.GetValue<string?>());
             LoadEditors(_typeEditors.Values, control);
             _advancedJsonTextBox.Text = ConfigDefinitions.SerializeNode(control);
+            _advancedJsonDirty = false;
             _previewPanel.Invalidate();
         }
         finally
@@ -918,36 +1000,138 @@ internal sealed class MainForm : Form
 
     private void CommitStandardField(FieldEditor editor)
     {
-        if (_isLoadingUi || _isClosing)
+        _ = TryCommitStandardField(editor, resetInvalidValue: true);
+    }
+
+    private bool TryCommitStandardField(FieldEditor editor, bool resetInvalidValue)
+    {
+        if (_isLoadingUi || IsShuttingDown)
         {
-            return;
+            return true;
         }
 
         JsonObject? control = GetSelectedControl();
         if (control is null)
         {
-            return;
+            return true;
         }
 
         if (!TryCreateNodeFromEditor(editor, out JsonNode? newValue, out string? errorMessage))
         {
             MessageBox.Show(this, errorMessage, "Invalid Field Value", MessageBoxButtons.OK, MessageBoxIcon.Error);
-            _isLoadingUi = true;
-            try
+            if (resetInvalidValue)
             {
-                SetEditorValue(editor, control[editor.Definition.Name]);
+                _isLoadingUi = true;
+                try
+                {
+                    SetEditorValue(editor, control[editor.Definition.Name]);
+                }
+                finally
+                {
+                    _isLoadingUi = false;
+                }
             }
-            finally
+            else
             {
-                _isLoadingUi = false;
+                editor.Control.Focus();
             }
 
-            return;
+            return false;
         }
 
         control[editor.Definition.Name] = newValue;
         SyncSelectedControlJson(control);
+        if (_pendingFieldEditor is FieldEditor pendingEditor &&
+            ReferenceEquals(pendingEditor.Control, editor.Control))
+        {
+            _pendingFieldEditor = null;
+        }
+
         RefreshSelectionDisplay();
+        return true;
+    }
+
+    private bool CommitPendingFieldEditorForSave()
+    {
+        if (_pendingFieldEditor is not FieldEditor editor)
+        {
+            return true;
+        }
+
+        if (editor.Control.IsDisposed || !IsCurrentFieldEditor(editor))
+        {
+            _pendingFieldEditor = null;
+            return true;
+        }
+
+        return TryCommitStandardField(editor, resetInvalidValue: false);
+    }
+
+    private bool CommitPendingEditorsForSave()
+    {
+        if (!CommitPendingFieldEditorForSave())
+        {
+            return false;
+        }
+
+        return CommitAdvancedJsonForSave();
+    }
+
+    private bool CommitAdvancedJsonForSave()
+    {
+        if (!_advancedJsonDirty || _document is null || IsShuttingDown)
+        {
+            return true;
+        }
+
+        JsonObject? existingControl = GetSelectedControl();
+        JsonObject? scheme = GetSelectedScheme();
+        JsonArray? controls = scheme?["GameControls"] as JsonArray;
+        if (existingControl is null || controls is null)
+        {
+            _advancedJsonDirty = false;
+            return true;
+        }
+
+        string currentJson = ConfigDefinitions.SerializeNode(existingControl);
+        if (string.Equals(_advancedJsonTextBox.Text.Trim(), currentJson.Trim(), StringComparison.Ordinal))
+        {
+            _advancedJsonDirty = false;
+            return true;
+        }
+
+        JsonNode? parsed;
+        try
+        {
+            parsed = JsonNode.Parse(_advancedJsonTextBox.Text);
+        }
+        catch (JsonException ex)
+        {
+            MessageBox.Show(this, ex.Message, "Invalid Advanced JSON", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            _advancedJsonTextBox.Focus();
+            return false;
+        }
+
+        if (parsed is not JsonObject replacement)
+        {
+            MessageBox.Show(this, "Advanced control JSON must be a JSON object.", "Invalid Advanced JSON", MessageBoxButtons.OK, MessageBoxIcon.Error);
+            _advancedJsonTextBox.Focus();
+            return false;
+        }
+
+        controls[_selectedControlIndex] = replacement;
+        _advancedJsonDirty = false;
+        RefreshControlList();
+        LoadSelectedControlIntoUi();
+        return true;
+    }
+
+    private bool IsCurrentFieldEditor(FieldEditor editor)
+    {
+        return (_commonEditors.TryGetValue(editor.Definition.Name, out FieldEditor? commonEditor) &&
+                ReferenceEquals(commonEditor.Control, editor.Control)) ||
+            (_typeEditors.TryGetValue(editor.Definition.Name, out FieldEditor? typeEditor) &&
+                ReferenceEquals(typeEditor.Control, editor.Control));
     }
 
     private bool TryCreateNodeFromEditor(FieldEditor editor, out JsonNode? value, out string? errorMessage)
@@ -1054,6 +1238,7 @@ internal sealed class MainForm : Form
         }
 
         controls[_selectedControlIndex] = replacement;
+        _advancedJsonDirty = false;
         RefreshControlList();
         LoadSelectedControlIntoUi();
         SetStatus("Applied advanced JSON to selected control");
@@ -1162,6 +1347,11 @@ internal sealed class MainForm : Form
     {
         int clickedIndex = _schemeListBox.IndexFromPoint(location);
         if (clickedIndex < 0 || clickedIndex >= _schemeListBox.Items.Count)
+        {
+            return;
+        }
+
+        if (!CommitPendingEditorsForSave())
         {
             return;
         }
@@ -1446,6 +1636,27 @@ internal sealed class MainForm : Form
         }
     }
 
+    private void MarkCurrentSchemeSelectedForLiveSave()
+    {
+        JsonArray? schemes = GetControlSchemes();
+        if (schemes is null || schemes.Count == 0)
+        {
+            return;
+        }
+
+        int selectedIndex = _schemeListBox.SelectedIndex >= 0
+            ? _schemeListBox.SelectedIndex
+            : _selectedSchemeIndex;
+        if (selectedIndex < 0 || selectedIndex >= schemes.Count)
+        {
+            return;
+        }
+
+        _selectedSchemeIndex = selectedIndex;
+        SetOnlySelectedScheme(selectedIndex);
+        RefreshSchemeList();
+    }
+
     private void RefreshSelectionDisplay()
     {
         JsonObject? control = GetSelectedControl();
@@ -1465,7 +1676,17 @@ internal sealed class MainForm : Form
 
     private void SyncSelectedControlJson(JsonObject control)
     {
-        _advancedJsonTextBox.Text = ConfigDefinitions.SerializeNode(control);
+        bool wasLoadingUi = _isLoadingUi;
+        _isLoadingUi = true;
+        try
+        {
+            _advancedJsonTextBox.Text = ConfigDefinitions.SerializeNode(control);
+            _advancedJsonDirty = false;
+        }
+        finally
+        {
+            _isLoadingUi = wasLoadingUi;
+        }
     }
 
     private string UpdateLivePathStatus()
@@ -1477,7 +1698,7 @@ internal sealed class MainForm : Form
 
     private bool TryUpdateLivePathStatus()
     {
-        if (_isClosing || IsDisposed || Disposing)
+        if (IsShuttingDown)
         {
             return false;
         }
@@ -1494,7 +1715,13 @@ internal sealed class MainForm : Form
         }
     }
 
-    private void SetStatus(string text) => _statusLabel.Text = text;
+    private void SetStatus(string text)
+    {
+        if (!IsShuttingDown)
+        {
+            _statusLabel.Text = text;
+        }
+    }
 
     private void LoadEmptyState()
     {
@@ -1512,6 +1739,7 @@ internal sealed class MainForm : Form
         ClearEditors(_commonEditors.Values);
         ClearEditors(_typeEditors.Values);
         _advancedJsonTextBox.Clear();
+        _advancedJsonDirty = false;
         _previewPanel.Invalidate();
     }
 
@@ -1649,7 +1877,7 @@ internal sealed class MainForm : Form
 
     private void RunUiAction(Action action, string title)
     {
-        if (_isClosing)
+        if (IsShuttingDown)
         {
             return;
         }
@@ -1660,14 +1888,17 @@ internal sealed class MainForm : Form
         }
         catch (JsonException ex)
         {
+            if (IsShuttingDown) return;
             MessageBox.Show(this, ex.Message, title, MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         catch (InvalidDataException ex)
         {
+            if (IsShuttingDown) return;
             MessageBox.Show(this, ex.Message, title, MessageBoxButtons.OK, MessageBoxIcon.Error);
         }
         catch (UnauthorizedAccessException ex)
         {
+            if (IsShuttingDown) return;
             MessageBox.Show(
                 this,
                 $"Windows denied access to a protected BlueStacks path.\n\n{ex.Message}\n\nRestart BlueStacks CFG Editor as administrator and try again.",
@@ -1677,6 +1908,7 @@ internal sealed class MainForm : Form
         }
         catch (Exception ex)
         {
+            if (IsShuttingDown) return;
             ErrorLogger.ShowUnexpectedError(this, title, ex);
         }
     }

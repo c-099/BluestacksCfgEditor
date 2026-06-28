@@ -12,6 +12,7 @@
 #include <fstream>
 #include <iterator>
 #include <string>
+#include <utility>
 
 // ========================================================================
 // 1. DINPUT8 PROXY FORWARDER
@@ -258,7 +259,7 @@ void ReportHookResolutionError(const char* targetName, const char* detail) {
     char buf[512] = {};
     sprintf_s(
         buf,
-        "BlueStacks dinput8 hook: failed to resolve %s. %s\n"
+        "BlueStacks dinput8 hook: %s. %s\n"
         "The affected wrapper feature will be disabled to avoid crashing BlueStacks.",
         targetName,
         detail ? detail : "");
@@ -659,19 +660,33 @@ bool IsRvaInsideModule(HMODULE hMod, uintptr_t rva) {
 // ========================================================================
 // 4. LIVE KMM CFG RELOAD
 // ========================================================================
-constexpr uintptr_t kKmmImportSchemesFromJsonPayloadRva = 0x404A50;
-constexpr uintptr_t kKmmLoadPackageCfgRva = 0x3F9F80;
+constexpr uintptr_t kKmmSetSchemeByNameRva = 0x4029D0;
+constexpr uintptr_t kKmmLoadPackageCfgRva = 0x3FB360;
 constexpr uintptr_t kKmmSetActiveCfgRva = 0x402610;
 constexpr uintptr_t kKmmDestroyCfgRva = 0x3F3CC0;
+constexpr uintptr_t kQtInvokeQVariantMethodRva = 0x32950;
+constexpr uintptr_t kQStringDtorThunkRva = 0xCDFAAC;
+constexpr uintptr_t kQStringFromStdStringThunkRva = 0xCDFAC4;
+constexpr uintptr_t kQVariantDtorThunkRva = 0xCDFC08;
+constexpr uintptr_t kQVariantFromQStringThunkRva = 0xCDFC1A;
+constexpr uintptr_t kQVariantMetaTypeInterfaceRva = 0x1A0D2E0;
+constexpr uintptr_t kKmmGlobalStatePtrRva = 0x1A719B0;
 constexpr const char* kBrawlStarsPackageName = "com.supercell.brawlstars";
-constexpr const char* kQByteArrayCtorDataSize =
-    "??0QByteArray@@QEAA@PEBD_J@Z";
-
-using QByteArrayCtorDataSizeFn = void* (*)(void*, const char*, long long);
-using KmmImportSchemesFromJsonPayloadFn = void (*)(void*, std::string*);
-using KmmLoadPackageCfgFn = void* (*)(void*, std::string*);
-using KmmSetActiveCfgFn = uint32_t (*)(void*, char);
+using KmmSetSchemeByNameFn = unsigned int (*)(const std::string*);
+using KmmLoadPackageCfgFn = void* (*)(void*, const std::string*);
+using KmmSetActiveCfgFn = __int64 (*)(void*, char);
 using KmmDestroyCfgFn = void (*)(void*);
+using QStringFromStdStringFn = void* (*)(void*, const std::string*);
+using QStringDtorFn = void (*)(void*);
+using QVariantFromQStringFn = void* (*)(void*, const void*);
+using QVariantDtorFn = void (*)(void*);
+using QtInvokeQVariantMethodFn = __int64 (*)(uintptr_t, const char*, void*);
+
+struct QtQVariantInvokeArg {
+    void* metaTypeInterface;
+    const char* typeName;
+    void* value;
+};
 
 bool GetFileWriteTime(const std::string& path, FILETIME* writeTime) {
     WIN32_FILE_ATTRIBUTE_DATA data = {};
@@ -709,6 +724,14 @@ std::string GetBrawlStarsLiveCfgPath() {
     return root + "\\Engine\\UserData\\InputMapper\\UserFiles\\" + kBrawlStarsPackageName + ".cfg";
 }
 
+std::string GetLiveUserFilesFolder() {
+    std::string root = GetBlueStacksDataRoot();
+    while (!root.empty() && (root.back() == '\\' || root.back() == '/')) {
+        root.pop_back();
+    }
+    return root + "\\Engine\\UserData\\InputMapper\\UserFiles";
+}
+
 std::string GetWrapperCfgPath() {
     std::string root = GetBlueStacksDataRoot();
     while (!root.empty() && (root.back() == '\\' || root.back() == '/')) {
@@ -721,11 +744,512 @@ std::string GetBrawlStarsReloadRequestPath() {
     return GetBrawlStarsLiveCfgPath() + ".reload";
 }
 
+struct ReloadMarkerState {
+    std::string reloadPath;
+    std::string cfgPath;
+    std::string packageName;
+    FILETIME writeTime = {};
+};
+
+struct DesiredCfgState {
+    std::string cfgPath;
+    std::string packageName;
+    std::string contents;
+};
+
+CRITICAL_SECTION gDesiredCfgLock = {};
+bool gDesiredCfgLockInitialized = false;
+std::vector<DesiredCfgState> gDesiredCfgStates;
+
+std::string GetPackageNameFromCfgPath(const std::string& cfgPath) {
+    size_t slashPos = cfgPath.find_last_of("\\/");
+    size_t nameStart = slashPos == std::string::npos ? 0 : slashPos + 1;
+    size_t cfgExtPos = cfgPath.rfind(".cfg");
+    if (cfgExtPos == std::string::npos || cfgExtPos < nameStart) {
+        return {};
+    }
+
+    return cfgPath.substr(nameStart, cfgExtPos - nameStart);
+}
+
+std::vector<ReloadMarkerState> DiscoverReloadMarkers() {
+    std::vector<ReloadMarkerState> markers;
+    std::string userFilesFolder = GetLiveUserFilesFolder();
+    std::string searchPath = userFilesFolder + "\\*.cfg.reload";
+
+    WIN32_FIND_DATAA findData = {};
+    HANDLE findHandle = FindFirstFileA(searchPath.c_str(), &findData);
+    if (findHandle == INVALID_HANDLE_VALUE) {
+        return markers;
+    }
+
+    do {
+        if ((findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0) {
+            continue;
+        }
+
+        std::string reloadPath = userFilesFolder + "\\" + findData.cFileName;
+        std::string cfgPath = reloadPath;
+        constexpr const char* reloadSuffix = ".reload";
+        if (cfgPath.size() <= std::strlen(reloadSuffix)) {
+            continue;
+        }
+
+        cfgPath.resize(cfgPath.size() - std::strlen(reloadSuffix));
+        std::string packageName = GetPackageNameFromCfgPath(cfgPath);
+        if (packageName.empty()) {
+            continue;
+        }
+
+        ReloadMarkerState marker = {};
+        marker.reloadPath = std::move(reloadPath);
+        marker.cfgPath = std::move(cfgPath);
+        marker.packageName = std::move(packageName);
+        marker.writeTime = findData.ftLastWriteTime;
+        markers.push_back(std::move(marker));
+    } while (FindNextFileA(findHandle, &findData));
+
+    FindClose(findHandle);
+    return markers;
+}
+
+const ReloadMarkerState* FindReloadMarkerState(
+    const std::vector<ReloadMarkerState>& markers,
+    const std::string& reloadPath) {
+
+    for (const ReloadMarkerState& marker : markers) {
+        if (marker.reloadPath == reloadPath) {
+            return &marker;
+        }
+    }
+
+    return nullptr;
+}
+
 bool ReadWholeFile(const std::string& path, std::string* contents) {
     std::ifstream input(path, std::ios::binary);
     if (!input) return false;
     contents->assign(std::istreambuf_iterator<char>(input), std::istreambuf_iterator<char>());
     return !contents->empty();
+}
+
+bool WriteWholeFileAtomically(const std::string& path, const std::string& contents) {
+    size_t slashPos = path.find_last_of("\\/");
+    std::string folder = slashPos == std::string::npos ? "." : path.substr(0, slashPos);
+    std::string fileName = slashPos == std::string::npos ? path : path.substr(slashPos + 1);
+
+    std::string tempPath = folder + "\\" + fileName +
+        ".restore." +
+        std::to_string(GetCurrentProcessId()) +
+        "." +
+        std::to_string(GetCurrentThreadId()) +
+        "." +
+        std::to_string(GetTickCount()) +
+        ".tmp";
+
+    HANDLE file = CreateFileA(
+        tempPath.c_str(),
+        GENERIC_WRITE,
+        0,
+        nullptr,
+        CREATE_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        DebugPrint("KMM live reload: failed to create temp restore file %s error=%lu\n", tempPath.c_str(), GetLastError());
+        return false;
+    }
+
+    bool ok = true;
+    const char* data = contents.data();
+    size_t remaining = contents.size();
+    while (remaining > 0) {
+        DWORD chunk = static_cast<DWORD>(std::min<size_t>(remaining, 1024 * 1024));
+        DWORD written = 0;
+        if (!WriteFile(file, data, chunk, &written, nullptr) || written != chunk) {
+            DebugPrint("KMM live reload: failed to write temp restore file %s error=%lu\n", tempPath.c_str(), GetLastError());
+            ok = false;
+            break;
+        }
+
+        data += written;
+        remaining -= written;
+    }
+
+    if (ok) {
+        FlushFileBuffers(file);
+    }
+
+    CloseHandle(file);
+
+    if (!ok) {
+        DeleteFileA(tempPath.c_str());
+        return false;
+    }
+
+    if (!MoveFileExA(tempPath.c_str(), path.c_str(), MOVEFILE_REPLACE_EXISTING | MOVEFILE_COPY_ALLOWED | MOVEFILE_WRITE_THROUGH)) {
+        DebugPrint("KMM live reload: failed to replace cfg %s from %s error=%lu\n", path.c_str(), tempPath.c_str(), GetLastError());
+        DeleteFileA(tempPath.c_str());
+        return false;
+    }
+
+    return true;
+}
+
+void RememberEditorSavedCfg(const std::string& cfgPath, const std::string& packageName) {
+    if (!gDesiredCfgLockInitialized) return;
+
+    std::string contents;
+    if (!ReadWholeFile(cfgPath, &contents)) {
+        DebugPrint("KMM live reload: could not cache editor-saved cfg %s\n", cfgPath.c_str());
+        return;
+    }
+
+    EnterCriticalSection(&gDesiredCfgLock);
+    auto existing = std::find_if(
+        gDesiredCfgStates.begin(),
+        gDesiredCfgStates.end(),
+        [&](const DesiredCfgState& state) {
+            return state.cfgPath == cfgPath;
+        });
+
+    if (existing == gDesiredCfgStates.end()) {
+        gDesiredCfgStates.push_back(DesiredCfgState{ cfgPath, packageName, std::move(contents) });
+    } else {
+        existing->packageName = packageName;
+        existing->contents = std::move(contents);
+    }
+
+    LeaveCriticalSection(&gDesiredCfgLock);
+    DebugPrint("KMM live reload: cached editor-saved cfg package=%s path=%s\n", packageName.c_str(), cfgPath.c_str());
+}
+
+void RestoreEditorSavedCfgsSnapshot(const std::vector<DesiredCfgState>& snapshot) {
+    for (const DesiredCfgState& state : snapshot) {
+        std::string currentContents;
+        bool currentRead = ReadWholeFile(state.cfgPath, &currentContents);
+        if (currentRead && currentContents == state.contents) {
+            continue;
+        }
+
+        if (WriteWholeFileAtomically(state.cfgPath, state.contents)) {
+            DebugPrint(
+                "KMM live reload: restored editor-saved cfg package=%s path=%s\n",
+                state.packageName.c_str(),
+                state.cfgPath.c_str());
+        }
+    }
+}
+
+void RestoreEditorSavedCfgs() {
+    if (!gDesiredCfgLockInitialized) return;
+
+    EnterCriticalSection(&gDesiredCfgLock);
+    std::vector<DesiredCfgState> snapshot = gDesiredCfgStates;
+    LeaveCriticalSection(&gDesiredCfgLock);
+
+    RestoreEditorSavedCfgsSnapshot(snapshot);
+}
+
+void RestoreEditorSavedCfgsOnProcessDetach() {
+    if (!gDesiredCfgLockInitialized) return;
+
+    RestoreEditorSavedCfgsSnapshot(gDesiredCfgStates);
+}
+
+uintptr_t ModuleAddressFromRva(HMODULE hMod, uintptr_t rva) {
+    if (!IsRvaInsideModule(hMod, rva)) return 0;
+    return reinterpret_cast<uintptr_t>(hMod) + rva;
+}
+
+bool IsJsonWhitespace(char c) {
+    return c == ' ' || c == '\t' || c == '\r' || c == '\n';
+}
+
+size_t SkipJsonWhitespace(const std::string& json, size_t pos, size_t end) {
+    while (pos < end && IsJsonWhitespace(json[pos])) {
+        ++pos;
+    }
+    return pos;
+}
+
+int HexDigitValue(char c) {
+    if (c >= '0' && c <= '9') return c - '0';
+    if (c >= 'a' && c <= 'f') return 10 + (c - 'a');
+    if (c >= 'A' && c <= 'F') return 10 + (c - 'A');
+    return -1;
+}
+
+bool ParseJsonStringAt(const std::string& json, size_t quotePos, size_t end, std::string* value, size_t* nextPos) {
+    if (quotePos >= end || json[quotePos] != '"') return false;
+
+    std::string parsed;
+    for (size_t pos = quotePos + 1; pos < end; ++pos) {
+        char c = json[pos];
+        if (c == '"') {
+            *value = std::move(parsed);
+            *nextPos = pos + 1;
+            return true;
+        }
+
+        if (c != '\\') {
+            parsed.push_back(c);
+            continue;
+        }
+
+        if (++pos >= end) return false;
+        char escaped = json[pos];
+        switch (escaped) {
+        case '"': parsed.push_back('"'); break;
+        case '\\': parsed.push_back('\\'); break;
+        case '/': parsed.push_back('/'); break;
+        case 'b': parsed.push_back('\b'); break;
+        case 'f': parsed.push_back('\f'); break;
+        case 'n': parsed.push_back('\n'); break;
+        case 'r': parsed.push_back('\r'); break;
+        case 't': parsed.push_back('\t'); break;
+        case 'u':
+            if (pos + 4 >= end) return false;
+            {
+                int value16 = 0;
+                for (int i = 0; i < 4; ++i) {
+                    int digit = HexDigitValue(json[pos + 1 + i]);
+                    if (digit < 0) return false;
+                    value16 = (value16 << 4) | digit;
+                }
+                pos += 4;
+                parsed.push_back(value16 >= 0 && value16 <= 0x7F ? static_cast<char>(value16) : '?');
+            }
+            break;
+        default:
+            parsed.push_back(escaped);
+            break;
+        }
+    }
+
+    return false;
+}
+
+size_t FindMatchingJsonToken(const std::string& json, size_t openPos, size_t end, char openToken, char closeToken) {
+    if (openPos >= end || json[openPos] != openToken) return std::string::npos;
+
+    std::vector<char> expectedClosers;
+    expectedClosers.push_back(closeToken);
+    for (size_t pos = openPos; pos < end; ++pos) {
+        char c = json[pos];
+        if (c == '"') {
+            std::string ignored;
+            size_t afterString = pos;
+            if (!ParseJsonStringAt(json, pos, end, &ignored, &afterString)) {
+                return std::string::npos;
+            }
+            pos = afterString - 1;
+            continue;
+        }
+
+        if (pos != openPos && (c == '{' || c == '[')) {
+            expectedClosers.push_back(c == '{' ? '}' : ']');
+        } else if (c == '}' || c == ']') {
+            if (expectedClosers.empty() || expectedClosers.back() != c) {
+                return std::string::npos;
+            }
+
+            expectedClosers.pop_back();
+            if (expectedClosers.empty()) {
+                return pos;
+            }
+        }
+    }
+
+    return std::string::npos;
+}
+
+bool FindTopLevelJsonKeyValueStart(
+    const std::string& json,
+    size_t objectStart,
+    size_t objectEnd,
+    const char* key,
+    size_t* valueStart) {
+
+    if (objectStart >= objectEnd || json[objectStart] != '{') return false;
+
+    int depth = 1;
+    for (size_t pos = objectStart + 1; pos < objectEnd; ++pos) {
+        char c = json[pos];
+        if (c == '"') {
+            std::string parsedKey;
+            size_t afterString = pos;
+            if (!ParseJsonStringAt(json, pos, objectEnd, &parsedKey, &afterString)) {
+                return false;
+            }
+
+            if (depth == 1 && parsedKey == key) {
+                size_t colonPos = SkipJsonWhitespace(json, afterString, objectEnd);
+                if (colonPos < objectEnd && json[colonPos] == ':') {
+                    *valueStart = SkipJsonWhitespace(json, colonPos + 1, objectEnd);
+                    return true;
+                }
+            }
+
+            pos = afterString - 1;
+            continue;
+        }
+
+        if (c == '{' || c == '[') {
+            ++depth;
+        } else if (c == '}' || c == ']') {
+            --depth;
+            if (depth <= 0) break;
+        }
+    }
+
+    return false;
+}
+
+bool ParseJsonBoolAt(const std::string& json, size_t pos, size_t end, bool* value) {
+    if (pos + 4 <= end && json.compare(pos, 4, "true") == 0) {
+        *value = true;
+        return true;
+    }
+    if (pos + 5 <= end && json.compare(pos, 5, "false") == 0) {
+        *value = false;
+        return true;
+    }
+    return false;
+}
+
+bool ExtractSelectedSchemeNameFromCfg(const std::string& cfgPath, std::string* schemeName) {
+    std::string json;
+    if (!ReadWholeFile(cfgPath, &json)) {
+        DebugPrint("KMM live reload: failed to read cfg for selected scheme: %s\n", cfgPath.c_str());
+        return false;
+    }
+
+    size_t controlSchemesKey = json.find("\"ControlSchemes\"");
+    if (controlSchemesKey == std::string::npos) {
+        DebugPrint("KMM live reload: ControlSchemes key not found in %s\n", cfgPath.c_str());
+        return false;
+    }
+
+    size_t arrayStart = json.find('[', controlSchemesKey);
+    if (arrayStart == std::string::npos) {
+        DebugPrint("KMM live reload: ControlSchemes array not found in %s\n", cfgPath.c_str());
+        return false;
+    }
+
+    size_t arrayEnd = FindMatchingJsonToken(json, arrayStart, json.size(), '[', ']');
+    if (arrayEnd == std::string::npos) {
+        DebugPrint("KMM live reload: ControlSchemes array is malformed in %s\n", cfgPath.c_str());
+        return false;
+    }
+
+    for (size_t pos = arrayStart + 1; pos < arrayEnd;) {
+        pos = SkipJsonWhitespace(json, pos, arrayEnd);
+        if (pos >= arrayEnd) break;
+        if (json[pos] == ',') {
+            ++pos;
+            continue;
+        }
+        if (json[pos] != '{') {
+            ++pos;
+            continue;
+        }
+
+        size_t objectEnd = FindMatchingJsonToken(json, pos, arrayEnd + 1, '{', '}');
+        if (objectEnd == std::string::npos) {
+            DebugPrint("KMM live reload: scheme object is malformed in %s\n", cfgPath.c_str());
+            return false;
+        }
+
+        size_t selectedValuePos = 0;
+        bool selected = false;
+        if (FindTopLevelJsonKeyValueStart(json, pos, objectEnd, "Selected", &selectedValuePos) &&
+            ParseJsonBoolAt(json, selectedValuePos, objectEnd, &selected) &&
+            selected) {
+
+            size_t nameValuePos = 0;
+            size_t afterName = 0;
+            std::string parsedName;
+            if (FindTopLevelJsonKeyValueStart(json, pos, objectEnd, "Name", &nameValuePos) &&
+                ParseJsonStringAt(json, nameValuePos, objectEnd, &parsedName, &afterName) &&
+                !parsedName.empty()) {
+
+                *schemeName = std::move(parsedName);
+                return true;
+            }
+        }
+
+        pos = objectEnd + 1;
+    }
+
+    DebugPrint("KMM live reload: no selected scheme found in %s\n", cfgPath.c_str());
+    return false;
+}
+
+bool ShowSchemeChangedToastUnsafe(HMODULE hdPlayerModule, const std::string& schemeName) {
+    uintptr_t base = reinterpret_cast<uintptr_t>(hdPlayerModule);
+    uintptr_t globalStatePtrAddress = ModuleAddressFromRva(hdPlayerModule, kKmmGlobalStatePtrRva);
+    if (!globalStatePtrAddress) return false;
+
+    uintptr_t kmmState = *reinterpret_cast<uintptr_t*>(globalStatePtrAddress);
+    if (!kmmState) {
+        DebugPrint("KMM live reload: qword_141A719B0 is null; toast skipped\n");
+        return false;
+    }
+
+    uintptr_t qmlObject = *reinterpret_cast<uintptr_t*>(kmmState);
+    if (!qmlObject) {
+        DebugPrint("KMM live reload: KMM QML object is null; toast skipped\n");
+        return false;
+    }
+
+    auto qStringFromStdString = reinterpret_cast<QStringFromStdStringFn>(base + kQStringFromStdStringThunkRva);
+    auto qStringDtor = reinterpret_cast<QStringDtorFn>(base + kQStringDtorThunkRva);
+    auto qVariantFromQString = reinterpret_cast<QVariantFromQStringFn>(base + kQVariantFromQStringThunkRva);
+    auto qVariantDtor = reinterpret_cast<QVariantDtorFn>(base + kQVariantDtorThunkRva);
+    auto invokeMethod = reinterpret_cast<QtInvokeQVariantMethodFn>(base + kQtInvokeQVariantMethodRva);
+
+    alignas(16) unsigned char qStringStorage[64] = {};
+    alignas(16) unsigned char qVariantStorage[64] = {};
+    bool qStringConstructed = false;
+    bool qVariantConstructed = false;
+
+    qStringFromStdString(qStringStorage, &schemeName);
+    qStringConstructed = true;
+    qVariantFromQString(qVariantStorage, qStringStorage);
+    qVariantConstructed = true;
+
+    QtQVariantInvokeArg arg = {
+        reinterpret_cast<void*>(base + kQVariantMetaTypeInterfaceRva),
+        "QVariant",
+        qVariantStorage
+    };
+
+    invokeMethod(qmlObject, "fShowSchemeChangedToast", &arg);
+
+    if (qVariantConstructed) {
+        qVariantDtor(qVariantStorage);
+    }
+    if (qStringConstructed) {
+        qStringDtor(qStringStorage);
+    }
+
+    return true;
+}
+
+bool SetSelectedSchemeAndToastSafely(
+    HMODULE hdPlayerModule,
+    KmmSetSchemeByNameFn setSchemeByNameFn,
+    const std::string& schemeName) {
+
+    __try {
+        setSchemeByNameFn(&schemeName);
+        ShowSchemeChangedToastUnsafe(hdPlayerModule, schemeName);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ReportHookResolutionError("KMM direct scheme switch failed", "The internal SetScheme/toast path raised an exception for this reload request.");
+        return false;
+    }
 }
 
 bool ExtractJsonNumber(const std::string& json, const char* key, double* value) {
@@ -848,7 +1372,45 @@ bool LoadWrapperSettings(const std::string& cfgPath) {
     return LoadWrapperSettingsFromFile(cfgPath);
 }
 
-bool ReloadBrawlStarsCfg(HMODULE hdPlayerModule, const std::string& cfgPath) {
+bool LoadAndApplyPackageCfgSafely(
+    KmmLoadPackageCfgFn loadPackageCfgFn,
+    KmmSetActiveCfgFn setActiveCfgFn,
+    KmmDestroyCfgFn destroyCfgFn,
+    const std::string& packageName) {
+
+    alignas(16) unsigned char cfgStorage[240] = {};
+    bool cfgConstructed = false;
+
+    __try {
+        loadPackageCfgFn(cfgStorage, &packageName);
+        cfgConstructed = true;
+
+        __int64 applyResult = setActiveCfgFn(cfgStorage, 0);
+        if (applyResult != 0) {
+            DebugPrint(
+                "KMM live reload: SetActiveCfg returned %lld for package=%s\n",
+                static_cast<long long>(applyResult),
+                packageName.c_str());
+        }
+
+        destroyCfgFn(cfgStorage);
+        cfgConstructed = false;
+        return applyResult == 0;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        ReportHookResolutionError("KMM live cfg apply failed", "The internal cfg load/apply path raised an exception for this reload request.");
+        if (cfgConstructed) {
+            __try {
+                destroyCfgFn(cfgStorage);
+            } __except (EXCEPTION_EXECUTE_HANDLER) {
+                DebugPrint("KMM live reload: cfg cleanup after failed apply also raised an exception\n");
+            }
+        }
+
+        return false;
+    }
+}
+
+bool ReloadPackageCfg(HMODULE hdPlayerModule, const std::string& cfgPath, const std::string& packageName) {
     if (GetFileAttributesA(cfgPath.c_str()) == INVALID_FILE_ATTRIBUTES) {
         DebugPrint("KMM live reload: cfg file does not exist: %s\n", cfgPath.c_str());
         return false;
@@ -856,83 +1418,128 @@ bool ReloadBrawlStarsCfg(HMODULE hdPlayerModule, const std::string& cfgPath) {
 
     if (!IsRvaInsideModule(hdPlayerModule, kKmmLoadPackageCfgRva) ||
         !IsRvaInsideModule(hdPlayerModule, kKmmSetActiveCfgRva) ||
-        !IsRvaInsideModule(hdPlayerModule, kKmmDestroyCfgRva)) {
-        ReportHookResolutionError("KMM live reload", "One or more KMM reload fallback RVAs are outside the HD-Player image.");
+        !IsRvaInsideModule(hdPlayerModule, kKmmDestroyCfgRva) ||
+        !IsRvaInsideModule(hdPlayerModule, kKmmSetSchemeByNameRva) ||
+        !IsRvaInsideModule(hdPlayerModule, kQtInvokeQVariantMethodRva) ||
+        !IsRvaInsideModule(hdPlayerModule, kQStringDtorThunkRva) ||
+        !IsRvaInsideModule(hdPlayerModule, kQStringFromStdStringThunkRva) ||
+        !IsRvaInsideModule(hdPlayerModule, kQVariantDtorThunkRva) ||
+        !IsRvaInsideModule(hdPlayerModule, kQVariantFromQStringThunkRva) ||
+        !IsRvaInsideModule(hdPlayerModule, kQVariantMetaTypeInterfaceRva) ||
+        !IsRvaInsideModule(hdPlayerModule, kKmmGlobalStatePtrRva)) {
+        ReportHookResolutionError("KMM live cfg apply", "One or more KMM reload or SetScheme/toast RVAs are outside the HD-Player image.");
         return false;
     }
 
-    std::string packageName = kBrawlStarsPackageName;
+    if (packageName.empty()) {
+        DebugPrint("KMM live reload: package name is empty for %s\n", cfgPath.c_str());
+        return false;
+    }
+
+    std::vector<int> setSchemeByNameSig = {
+        0x48, 0x89, 0x5c, 0x24, 0x18, 0x55, 0x57, 0x41, 0x56, 0x48,
+        0x83, 0xec, 0x40, 0x48, 0x8b, 0xd1, 0x48, 0x8d, 0x4c, 0x24,
+        0x20, 0xff, 0x15, 0x35, 0x22, 0xa3, 0x00, 0x48, 0x8b, 0x3d,
+        0xbe, 0xef, 0x66, 0x01
+    };
     std::vector<int> loadPackageCfgSig = {
-        0x48, 0x89, 0x5c, 0x24, -1, 0x48, 0x89, 0x74, 0x24, -1, 0x55, 0x57, 0x41, 0x54, 0x41, 0x56, 0x41, 0x57,
-        0x48, 0x8d, 0x6c, 0x24, -1, 0x48, 0x81, 0xec, 0xe0, 0x00, 0x00, 0x00, 0x48, 0x8b, 0x05, -1, -1, -1, -1,
-        0x48, 0x33, 0xc4, 0x48, 0x89, 0x45, -1, 0x48, 0x8b, 0xf2
+        0x48, 0x89, 0x5c, 0x24, -1, 0x48, 0x89, 0x74, 0x24, -1,
+        0x57, 0x48, 0x81, 0xec, 0xd0, 0x02, 0x00, 0x00
     };
     std::vector<int> setActiveCfgSig = {
-        0x48, 0x89, 0x5c, 0x24, -1, 0x48, 0x89, 0x6c, 0x24, -1, 0x48, 0x89, 0x74, 0x24, -1, 0x57,
-        0x48, 0x81, 0xec, 0xe0, 0x00, 0x00, 0x00, 0x48, 0x8b, 0x05, -1, -1, -1, -1,
-        0x48, 0x33, 0xc4, 0x48, 0x89, 0x84, 0x24, -1, -1, -1, -1, 0x48, 0x8b, 0xf9
+        0x48, 0x89, 0x5c, 0x24, -1, 0x48, 0x89, 0x6c, 0x24, -1,
+        0x48, 0x89, 0x74, 0x24, -1, 0x57, 0x48, 0x81, 0xec, 0xe0,
+        0x00, 0x00, 0x00, 0x48, 0x8b, 0x05, -1, -1, -1, -1,
+        0x48, 0x33, 0xc4, 0x48, 0x89, 0x84, 0x24, -1, -1, -1, -1,
+        0x48, 0x8b, 0xf9
     };
+    std::vector<int> destroyCfgSig = {
+        0x40, 0x57, 0x48, 0x83, 0xec, 0x20, 0x48, 0x8b, 0x91,
+        -1, -1, -1, -1, 0x48, 0x8b, 0xf9, 0x48, 0x83, 0xfa, 0x10
+    };
+
     uintptr_t loadPackageCfgAddr = ResolveFunction(hdPlayerModule, loadPackageCfgSig, kKmmLoadPackageCfgRva);
-    uintptr_t setActiveCfgAddr = ResolveFunction(hdPlayerModule, setActiveCfgSig, kKmmSetActiveCfgRva);
-    uintptr_t destroyCfgAddr = reinterpret_cast<uintptr_t>(hdPlayerModule) + kKmmDestroyCfgRva;
     if (!loadPackageCfgAddr) {
-        ReportHookResolutionError("Kmm_loadPackageCfg", "Signature and fallback RVA resolution both failed.");
+        ReportHookResolutionError("KMM live cfg apply", "LoadPackageCfg signature resolution failed.");
         return false;
     }
+
+    uintptr_t setActiveCfgAddr = ResolveFunction(hdPlayerModule, setActiveCfgSig, kKmmSetActiveCfgRva);
     if (!setActiveCfgAddr) {
-        ReportHookResolutionError("Kmm_setActiveCfg", "Signature and fallback RVA resolution both failed.");
-        return false;
-    }
-    if (!IsRvaInsideModule(hdPlayerModule, kKmmDestroyCfgRva) || !destroyCfgAddr) {
-        ReportHookResolutionError("Kmm_destroyCfg", "Fallback RVA is outside the HD-Player image.");
+        ReportHookResolutionError("KMM live cfg apply", "SetActiveCfg signature resolution failed.");
         return false;
     }
 
-    auto loadPackageCfgFn = reinterpret_cast<KmmLoadPackageCfgFn>(loadPackageCfgAddr);
-    auto setActiveCfgFn = reinterpret_cast<KmmSetActiveCfgFn>(setActiveCfgAddr);
-    auto destroyCfgFn = reinterpret_cast<KmmDestroyCfgFn>(destroyCfgAddr);
+    uintptr_t destroyCfgAddr = ResolveFunction(hdPlayerModule, destroyCfgSig, kKmmDestroyCfgRva);
+    if (!destroyCfgAddr) {
+        ReportHookResolutionError("KMM live cfg apply", "DestroyCfg signature resolution failed.");
+        return false;
+    }
 
-    alignas(16) unsigned char cfgStorage[240] = {};
+    uintptr_t setSchemeByNameAddr = ResolveFunction(hdPlayerModule, setSchemeByNameSig, kKmmSetSchemeByNameRva);
+    if (!setSchemeByNameAddr) {
+        ReportHookResolutionError("KMM direct scheme switch", "SetScheme signature resolution failed.");
+        return false;
+    }
+
     LoadWrapperSettings(cfgPath);
-    DebugPrint("KMM live reload: loading package cfg from disk: %s\n", cfgPath.c_str());
-    loadPackageCfgFn(cfgStorage, &packageName);
-    uint32_t result = setActiveCfgFn(cfgStorage, 0);
-    destroyCfgFn(cfgStorage);
-    DebugPrint("KMM live reload: KmmSetActiveCfg returned 0x%x\n", result);
-    return result == 0;
+
+    DebugPrint(
+        "KMM live reload: loading and applying package cfg package=%s path=%s\n",
+        packageName.c_str(),
+        cfgPath.c_str());
+    bool applied = LoadAndApplyPackageCfgSafely(
+        reinterpret_cast<KmmLoadPackageCfgFn>(loadPackageCfgAddr),
+        reinterpret_cast<KmmSetActiveCfgFn>(setActiveCfgAddr),
+        reinterpret_cast<KmmDestroyCfgFn>(destroyCfgAddr),
+        packageName);
+    if (!applied) {
+        return false;
+    }
+
+    std::string selectedSchemeName;
+    if (!ExtractSelectedSchemeNameFromCfg(cfgPath, &selectedSchemeName)) {
+        ReportHookResolutionError("KMM direct scheme switch", "The saved cfg did not contain a selected scheme name.");
+        return false;
+    }
+
+    DebugPrint(
+        "KMM live reload: directly selecting scheme package=%s scheme=%s path=%s\n",
+        packageName.c_str(),
+        selectedSchemeName.c_str(),
+        cfgPath.c_str());
+    auto setSchemeByNameFn = reinterpret_cast<KmmSetSchemeByNameFn>(setSchemeByNameAddr);
+    return SetSelectedSchemeAndToastSafely(hdPlayerModule, setSchemeByNameFn, selectedSchemeName);
 }
 
 DWORD WINAPI KmmLiveReloadThread(LPVOID param) {
     HMODULE hdPlayerModule = reinterpret_cast<HMODULE>(param);
-    std::string cfgPath = GetBrawlStarsLiveCfgPath();
-    std::string reloadRequestPath = GetBrawlStarsReloadRequestPath();
-    FILETIME lastReloadRequestTime = {};
-    bool haveReloadRequestTime = GetFileWriteTime(reloadRequestPath, &lastReloadRequestTime);
+    std::vector<ReloadMarkerState> knownReloadMarkers = DiscoverReloadMarkers();
 
-    LoadWrapperSettings(cfgPath);
-    DebugPrint("KMM live reload thread started for %s\n", cfgPath.c_str());
-    DebugPrint("KMM live reload: save from cfg editor to reload from disk\n");
+    LoadWrapperSettings(GetBrawlStarsLiveCfgPath());
+    DebugPrint("KMM live reload thread started for %s\n", GetLiveUserFilesFolder().c_str());
+    DebugPrint("KMM live reload: watching all *.cfg.reload markers\n");
 
     while (true) {
-        FILETIME currentReloadRequestTime = {};
-        bool editorRequestedReload = false;
-        if (GetFileWriteTime(reloadRequestPath, &currentReloadRequestTime)) {
-            if (!haveReloadRequestTime) {
-                lastReloadRequestTime = currentReloadRequestTime;
-                haveReloadRequestTime = true;
-                editorRequestedReload = true;
-            } else if (FileTimesDiffer(lastReloadRequestTime, currentReloadRequestTime)) {
-                lastReloadRequestTime = currentReloadRequestTime;
-                editorRequestedReload = true;
+        std::vector<ReloadMarkerState> currentReloadMarkers = DiscoverReloadMarkers();
+        for (const ReloadMarkerState& marker : currentReloadMarkers) {
+            const ReloadMarkerState* knownMarker = FindReloadMarkerState(knownReloadMarkers, marker.reloadPath);
+            bool editorRequestedReload = knownMarker == nullptr ||
+                FileTimesDiffer(knownMarker->writeTime, marker.writeTime);
+            if (!editorRequestedReload) {
+                continue;
             }
+
+            // Watch only explicit reload request markers, not cfg files.
+            // BlueStacks can write cfg files as a side effect of scheme changes.
+            RememberEditorSavedCfg(marker.cfgPath, marker.packageName);
+            LoadWrapperSettings(marker.cfgPath);
+            ReloadPackageCfg(hdPlayerModule, marker.cfgPath, marker.packageName);
+            RestoreEditorSavedCfgs();
         }
 
-        // Watch only the explicit reload request marker, not the cfg file. The
-        // KMM apply path can write the cfg file as a side effect.
-        if (editorRequestedReload) {
-            ReloadBrawlStarsCfg(hdPlayerModule, cfgPath);
-        }
-
+        knownReloadMarkers = std::move(currentReloadMarkers);
+        RestoreEditorSavedCfgs();
         Sleep(250);
     }
 }
@@ -1099,8 +1706,14 @@ DWORD WINAPI MainThread(LPVOID lpReserved) {
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
         gWrapperModuleHandle = hModule;
+        InitializeCriticalSection(&gDesiredCfgLock);
+        gDesiredCfgLockInitialized = true;
         DisableThreadLibraryCalls(hModule);
         CreateThread(nullptr, 0, MainThread, hModule, 0, nullptr);
+    } else if (ul_reason_for_call == DLL_PROCESS_DETACH) {
+        if (lpReserved != nullptr) {
+            RestoreEditorSavedCfgsOnProcessDetach();
+        }
     }
     return TRUE;
 }

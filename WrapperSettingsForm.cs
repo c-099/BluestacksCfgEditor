@@ -21,6 +21,13 @@ internal sealed class WrapperSettingsForm : Form
         MinimumSize = new Size(500, 400);
         ClientSize = new Size(560, 520);
         ShowInTaskbar = false;
+        FormClosing += (_, _) =>
+        {
+            if (DialogResult == DialogResult.None)
+            {
+                DialogResult = DialogResult.Cancel;
+            }
+        };
 
         TableLayoutPanel root = new()
         {
