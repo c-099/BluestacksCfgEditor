@@ -286,6 +286,14 @@ internal static class ConfigService
             }
         }
 
+        foreach (WrapperStringSettingDefinition definition in ConfigDefinitions.WrapperStringSettings)
+        {
+            if (wrapper[definition.Name] is null)
+            {
+                wrapper[definition.Name] = definition.DefaultValue;
+            }
+        }
+
         NormalizeWrapperSettings(wrapper);
     }
 
@@ -323,10 +331,38 @@ internal static class ConfigService
         return values;
     }
 
+    internal static IReadOnlyDictionary<string, string> ReadWrapperStringSettings(JsonObject? wrapper)
+    {
+        Dictionary<string, string> values = new(StringComparer.Ordinal);
+
+        foreach (WrapperStringSettingDefinition definition in ConfigDefinitions.WrapperStringSettings)
+        {
+            if (TryGetString(wrapper?[definition.Name], out string? actual))
+            {
+                values[definition.Name] = actual ?? string.Empty;
+            }
+            else
+            {
+                values[definition.Name] = definition.DefaultValue;
+            }
+        }
+
+        return values;
+    }
+
     internal static void ApplyWrapperSettings(JsonObject wrapper, IReadOnlyDictionary<string, double> values)
     {
         EnsureWrapperSettingDefaults(wrapper);
         foreach ((string key, double value) in values)
+        {
+            wrapper[key] = value;
+        }
+    }
+
+    internal static void ApplyWrapperStringSettings(JsonObject wrapper, IReadOnlyDictionary<string, string> values)
+    {
+        EnsureWrapperSettingDefaults(wrapper);
+        foreach ((string key, string value) in values)
         {
             wrapper[key] = value;
         }
@@ -360,6 +396,18 @@ internal static class ConfigService
                 value = 0;
                 return false;
         }
+    }
+
+    internal static bool TryGetString(JsonNode? node, out string? value)
+    {
+        if (node is JsonValue jsonValue && jsonValue.TryGetValue(out string? text))
+        {
+            value = text ?? string.Empty;
+            return true;
+        }
+
+        value = null;
+        return false;
     }
 
     internal static string SerializeDocument(JsonObject document)

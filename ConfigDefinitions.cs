@@ -18,6 +18,8 @@ internal sealed record FieldDefinition(string Name, FieldKind Kind);
 
 internal sealed record WrapperSettingDefinition(string Name, double DefaultValue);
 
+internal sealed record WrapperStringSettingDefinition(string Name, string DefaultValue);
+
 internal static class ConfigDefinitions
 {
     internal const string DefaultPackage = "com.supercell.brawlstars";
@@ -120,6 +122,15 @@ internal static class ConfigDefinitions
         new("gDpadDirectionSmoothingFactor", 0.45),
         new("gDpadZeroHoldMs", 80.0),
         new("gDpadKeyboardZeroHoldMs", 120.0),
+        new("gCustomCursorEnabled", 0.0),
+    ];
+
+    internal static readonly IReadOnlyList<WrapperStringSettingDefinition> WrapperStringSettings =
+    [
+        new("gCustomCursorMousePath", ""),
+        new("gCustomCursorMobaPath", ""),
+        new("gCustomCursorMobaRightPath", ""),
+        new("gCustomCursorBlankPath", ""),
     ];
 
     internal static string SerializeNode(JsonNode node) =>

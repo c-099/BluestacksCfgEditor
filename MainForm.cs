@@ -50,7 +50,6 @@ internal sealed class MainForm : Form
     internal MainForm()
     {
         InitializeComponent();
-        FormClosing += OnMainFormClosing;
         Shown += (_, _) => BeginInvoke(() =>
         {
             if (!IsShuttingDown)
@@ -288,9 +287,12 @@ internal sealed class MainForm : Form
         });
     }
 
-    private void OnMainFormClosing(object? sender, FormClosingEventArgs e)
+    protected override void OnFormClosing(FormClosingEventArgs e)
     {
         _isClosing = true;
+        e.Cancel = false;
+        base.OnFormClosing(e);
+        e.Cancel = false;
     }
 
     protected override void WndProc(ref Message m)

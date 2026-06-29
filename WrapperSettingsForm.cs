@@ -21,14 +21,6 @@ internal sealed class WrapperSettingsForm : Form
         MinimumSize = new Size(500, 400);
         ClientSize = new Size(560, 520);
         ShowInTaskbar = false;
-        FormClosing += (_, _) =>
-        {
-            if (DialogResult == DialogResult.None)
-            {
-                DialogResult = DialogResult.Cancel;
-            }
-        };
-
         TableLayoutPanel root = new()
         {
             Dock = DockStyle.Fill,
@@ -53,26 +45,12 @@ internal sealed class WrapperSettingsForm : Form
 
         foreach (WrapperSettingDefinition definition in ConfigDefinitions.WrapperSettings)
         {
-            int row = fields.RowCount++;
-            fields.RowStyles.Add(new RowStyle(SizeType.AutoSize));
-            fields.Controls.Add(
-                new Label
-                {
-                    Text = definition.Name,
-                    AutoSize = true,
-                    Anchor = AnchorStyles.Left,
-                    Margin = new Padding(0, 8, 12, 0),
-                },
-                0,
-                row);
+            AddEditor(fields, definition.Name);
+        }
 
-            TextBox editor = new()
-            {
-                Dock = DockStyle.Top,
-                Margin = new Padding(0, 4, 0, 0),
-            };
-            fields.Controls.Add(editor, 1, row);
-            _editors[definition.Name] = editor;
+        foreach (WrapperStringSettingDefinition definition in ConfigDefinitions.WrapperStringSettings)
+        {
+            AddEditor(fields, definition.Name, browseForCursorFile: true);
         }
 
         Panel scrollPanel = new()
@@ -113,6 +91,89 @@ internal sealed class WrapperSettingsForm : Form
         CancelButton = cancelButton;
     }
 
+    private void AddEditor(TableLayoutPanel fields, string name, bool browseForCursorFile = false)
+    {
+        int row = fields.RowCount++;
+        fields.RowStyles.Add(new RowStyle(SizeType.AutoSize));
+        fields.Controls.Add(
+            new Label
+            {
+                Text = name,
+                AutoSize = true,
+                Anchor = AnchorStyles.Left,
+                Margin = new Padding(0, 8, 12, 0),
+            },
+            0,
+            row);
+
+        TextBox editor = new()
+        {
+            Dock = DockStyle.Top,
+            Margin = new Padding(0, 4, 0, 0),
+        };
+
+        if (browseForCursorFile)
+        {
+            TableLayoutPanel pathControls = new()
+            {
+                AutoSize = true,
+                AutoSizeMode = AutoSizeMode.GrowAndShrink,
+                ColumnCount = 2,
+                Dock = DockStyle.Top,
+                Margin = new Padding(0, 4, 0, 0),
+            };
+            pathControls.ColumnStyles.Add(new ColumnStyle(SizeType.Percent, 100));
+            pathControls.ColumnStyles.Add(new ColumnStyle(SizeType.AutoSize));
+
+            editor.Margin = new Padding(0);
+            Button browseButton = new()
+            {
+                Text = "...",
+                AutoSize = true,
+                Margin = new Padding(6, 0, 0, 0),
+            };
+            browseButton.Click += (_, _) => BrowseForCursorFile(editor);
+
+            pathControls.Controls.Add(editor, 0, 0);
+            pathControls.Controls.Add(browseButton, 1, 0);
+            fields.Controls.Add(pathControls, 1, row);
+        }
+        else
+        {
+            fields.Controls.Add(editor, 1, row);
+        }
+
+        _editors[name] = editor;
+    }
+
+    private void BrowseForCursorFile(TextBox editor)
+    {
+        using OpenFileDialog dialog = new()
+        {
+            Title = "Select Cursor File",
+            Filter = "Cursor files (*.cur;*.ani)|*.cur;*.ani|All files (*.*)|*.*",
+            CheckFileExists = true,
+            Multiselect = false,
+        };
+
+        string currentPath = editor.Text.Trim();
+        if (!string.IsNullOrWhiteSpace(currentPath))
+        {
+            string? directory = Path.GetDirectoryName(currentPath);
+            if (!string.IsNullOrWhiteSpace(directory) && Directory.Exists(directory))
+            {
+                dialog.InitialDirectory = directory;
+            }
+
+            dialog.FileName = Path.GetFileName(currentPath);
+        }
+
+        if (dialog.ShowDialog(this) == DialogResult.OK)
+        {
+            editor.Text = dialog.FileName;
+        }
+    }
+
     private void LoadValues()
     {
         IReadOnlyDictionary<string, double> values = ConfigService.ReadWrapperSettings(_document);
@@ -120,11 +181,18 @@ internal sealed class WrapperSettingsForm : Form
         {
             _editors[definition.Name].Text = ConfigDefinitions.FormatDouble(values[definition.Name]);
         }
+
+        IReadOnlyDictionary<string, string> stringValues = ConfigService.ReadWrapperStringSettings(_document);
+        foreach (WrapperStringSettingDefinition definition in ConfigDefinitions.WrapperStringSettings)
+        {
+            _editors[definition.Name].Text = stringValues[definition.Name];
+        }
     }
 
     private void ApplyValues()
     {
         Dictionary<string, double> values = new(StringComparer.Ordinal);
+        Dictionary<string, string> stringValues = new(StringComparer.Ordinal);
         foreach (WrapperSettingDefinition definition in ConfigDefinitions.WrapperSettings)
         {
             string text = _editors[definition.Name].Text.Trim();
@@ -150,7 +218,13 @@ internal sealed class WrapperSettingsForm : Form
             values[definition.Name] = parsed;
         }
 
+        foreach (WrapperStringSettingDefinition definition in ConfigDefinitions.WrapperStringSettings)
+        {
+            stringValues[definition.Name] = _editors[definition.Name].Text.Trim();
+        }
+
         ConfigService.ApplyWrapperSettings(_document, values);
+        ConfigService.ApplyWrapperStringSettings(_document, stringValues);
         DialogResult = DialogResult.OK;
         Close();
     }

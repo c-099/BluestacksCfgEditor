@@ -5,6 +5,7 @@
 #include <MinHook.h>
 #include <cstdio>
 #include <algorithm>
+#include <cctype>
 #include <cstdarg>
 #include <cmath>
 #include <cstdlib>
@@ -76,6 +77,12 @@ DpadHandleKeyEventFn pOriginalDpadHandleKeyEvent = nullptr;
 
 typedef __int64(__fastcall *DpadUpdateVirtualJoystickTouchFn)(void*, char);
 DpadUpdateVirtualJoystickTouchFn pDpadUpdateVirtualJoystickTouch = nullptr;
+
+typedef HCURSOR(WINAPI *SetCursorFn)(HCURSOR);
+SetCursorFn pOriginalSetCursor = nullptr;
+
+typedef void(__fastcall *BlueStacksApplyCursorFn)(void*);
+BlueStacksApplyCursorFn pOriginalBlueStacksApplyCursor = nullptr;
 
 void ReportHookResolutionError(const char* targetName, const char* detail);
 
@@ -174,6 +181,7 @@ constexpr uintptr_t kMOBASkillComputeAimCoordsRva = 0x3C5690;
 constexpr uintptr_t kDpadHandleGamepadAnalogMoveRva = 0xCED010;
 constexpr uintptr_t kDpadHandleKeyEventRva = 0xCED320;
 constexpr uintptr_t kDpadUpdateVirtualJoystickTouchRva = 0xCECC70;
+constexpr uintptr_t kBlueStacksApplyCursorRva = 0xF71E0;
 constexpr double kMOBASkillScreenPercentMax = 100.0;
 double gMOBASkillEdgeThresholdPercent = 25.0;
 double gMOBASkillMaxAimXBiasPercent = 1.5;
@@ -192,6 +200,25 @@ DWORD gDpadKeyboardLastDebugPrintTick = 0;
 bool gDebugConsoleEnabled = false;
 bool gDebugConsoleAttached = false;
 bool gHookResolutionErrorShown = false;
+bool gCustomCursorEnabled = false;
+std::string gCustomCursorMousePath;
+std::string gCustomCursorMobaPath;
+std::string gCustomCursorMobaRightPath;
+std::string gCustomCursorBlankPath;
+HCURSOR gCustomCursorMouseHandle = nullptr;
+HCURSOR gCustomCursorMobaHandle = nullptr;
+HCURSOR gCustomCursorMobaRightHandle = nullptr;
+HCURSOR gCustomCursorBlankHandle = nullptr;
+CRITICAL_SECTION gCustomCursorLock = {};
+bool gCustomCursorLockInitialized = false;
+LONG gActiveBlueStacksCursorRole = 0;
+
+enum BlueStacksCursorRole {
+    kBlueStacksCursorRoleMouse = 0,
+    kBlueStacksCursorRoleMoba = 1,
+    kBlueStacksCursorRoleMobaRight = 2,
+    kBlueStacksCursorRoleBlank = 3,
+};
 
 struct DpadStickSmoothingState {
     bool hasDirection = false;
@@ -253,6 +280,175 @@ void UpdateDebugConsoleVisibility() {
         FreeConsole();
         gDebugConsoleAttached = false;
     }
+}
+
+std::wstring StringToWide(const std::string& text) {
+    if (text.empty()) return {};
+
+    int length = MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, text.c_str(), -1, nullptr, 0);
+    UINT codePage = CP_UTF8;
+    DWORD flags = MB_ERR_INVALID_CHARS;
+    if (length == 0) {
+        codePage = CP_ACP;
+        flags = 0;
+        length = MultiByteToWideChar(codePage, flags, text.c_str(), -1, nullptr, 0);
+    }
+    if (length == 0) return {};
+
+    std::wstring wide(static_cast<size_t>(length), L'\0');
+    MultiByteToWideChar(codePage, flags, text.c_str(), -1, wide.data(), length);
+    wide.resize(static_cast<size_t>(length - 1));
+    return wide;
+}
+
+bool HasCursorFileExtension(const std::string& path) {
+    size_t dotPos = path.find_last_of('.');
+    if (dotPos == std::string::npos) return false;
+
+    std::string ext = path.substr(dotPos);
+    std::transform(ext.begin(), ext.end(), ext.begin(), [](unsigned char ch) {
+        return static_cast<char>(std::tolower(ch));
+    });
+    return ext == ".cur" || ext == ".ani";
+}
+
+void DestroyCursorHandle(HCURSOR* handle) {
+    if (*handle) {
+        DestroyCursor(*handle);
+        *handle = nullptr;
+    }
+}
+
+void DestroyCustomCursorsLocked() {
+    DestroyCursorHandle(&gCustomCursorMouseHandle);
+    DestroyCursorHandle(&gCustomCursorMobaHandle);
+    DestroyCursorHandle(&gCustomCursorMobaRightHandle);
+    DestroyCursorHandle(&gCustomCursorBlankHandle);
+}
+
+HCURSOR LoadCustomCursorFile(const std::string& path, const char* roleName) {
+    if (path.empty()) return nullptr;
+
+    if (!HasCursorFileExtension(path)) {
+        DebugPrint(
+            "Custom cursor %s: unsupported file extension for %s; use .cur or .ani\n",
+            roleName,
+            path.c_str());
+        return nullptr;
+    }
+
+    std::wstring widePath = StringToWide(path);
+    HCURSOR handle = nullptr;
+    if (!widePath.empty()) {
+        handle = static_cast<HCURSOR>(LoadImageW(
+            nullptr,
+            widePath.c_str(),
+            IMAGE_CURSOR,
+            0,
+            0,
+            LR_LOADFROMFILE | LR_DEFAULTSIZE));
+    }
+
+    if (handle) {
+        DebugPrint("Custom cursor %s loaded: %s\n", roleName, path.c_str());
+    } else {
+        DebugPrint(
+            "Custom cursor %s: failed to load %s, GetLastError=%lu\n",
+            roleName,
+            path.c_str(),
+            static_cast<unsigned long>(GetLastError()));
+    }
+    return handle;
+}
+
+void ReloadCustomCursors() {
+    if (!gCustomCursorLockInitialized) return;
+
+    EnterCriticalSection(&gCustomCursorLock);
+    DestroyCustomCursorsLocked();
+
+    if (gCustomCursorEnabled) {
+        gCustomCursorMouseHandle = LoadCustomCursorFile(gCustomCursorMousePath, "mouse");
+        gCustomCursorMobaHandle = LoadCustomCursorFile(gCustomCursorMobaPath, "moba");
+        gCustomCursorMobaRightHandle = LoadCustomCursorFile(gCustomCursorMobaRightPath, "moba_right");
+        gCustomCursorBlankHandle = LoadCustomCursorFile(gCustomCursorBlankPath, "blank");
+    }
+
+    LeaveCriticalSection(&gCustomCursorLock);
+}
+
+HCURSOR GetCustomCursorForRoleLocked(LONG role) {
+    HCURSOR roleHandle = nullptr;
+    switch (role) {
+        case kBlueStacksCursorRoleMoba:
+            roleHandle = gCustomCursorMobaHandle;
+            break;
+        case kBlueStacksCursorRoleMobaRight:
+            roleHandle = gCustomCursorMobaRightHandle;
+            break;
+        case kBlueStacksCursorRoleBlank:
+            roleHandle = gCustomCursorBlankHandle;
+            break;
+        case kBlueStacksCursorRoleMouse:
+        default:
+            roleHandle = gCustomCursorMouseHandle;
+            break;
+    }
+
+    return roleHandle;
+}
+
+std::string ReadBlueStacksStdString(void* stringObj) {
+    if (!stringObj) return {};
+
+    auto* bytes = reinterpret_cast<uint8_t*>(stringObj);
+    size_t length = *reinterpret_cast<size_t*>(bytes + 0x10);
+    size_t capacity = *reinterpret_cast<size_t*>(bytes + 0x18);
+    const char* data = capacity >= 0x10
+        ? *reinterpret_cast<const char**>(bytes)
+        : reinterpret_cast<const char*>(bytes);
+
+    if (!data || length > 4096) return {};
+    return std::string(data, length);
+}
+
+LONG IdentifyBlueStacksCursorRole(const std::string& style) {
+    if (style == "moba") return kBlueStacksCursorRoleMoba;
+    if (style == "moba_right") return kBlueStacksCursorRoleMobaRight;
+    if (style == "blank") return kBlueStacksCursorRoleBlank;
+    return kBlueStacksCursorRoleMouse;
+}
+
+void __fastcall CustomBlueStacksApplyCursor(void* styleStringObj) {
+    std::string style = ReadBlueStacksStdString(styleStringObj);
+    LONG role = IdentifyBlueStacksCursorRole(style);
+    InterlockedExchange(&gActiveBlueStacksCursorRole, role);
+
+    if (pOriginalBlueStacksApplyCursor) {
+        pOriginalBlueStacksApplyCursor(styleStringObj);
+    }
+}
+
+HCURSOR WINAPI CustomSetCursor(HCURSOR cursor) {
+    if (!pOriginalSetCursor) {
+        return cursor;
+    }
+
+    HCURSOR cursorToSet = cursor;
+    if (cursor && gCustomCursorLockInitialized) {
+        EnterCriticalSection(&gCustomCursorLock);
+        HCURSOR customCursor = gCustomCursorEnabled
+            ? GetCustomCursorForRoleLocked(InterlockedCompareExchange(&gActiveBlueStacksCursorRole, 0, 0))
+            : nullptr;
+        if (customCursor) {
+            cursorToSet = customCursor;
+        }
+        HCURSOR previous = pOriginalSetCursor(cursorToSet);
+        LeaveCriticalSection(&gCustomCursorLock);
+        return previous;
+    }
+
+    return pOriginalSetCursor(cursorToSet);
 }
 
 void ReportHookResolutionError(const char* targetName, const char* detail) {
@@ -1272,6 +1468,61 @@ bool ExtractJsonNumber(const std::string& json, const char* key, double* value) 
     return true;
 }
 
+bool ExtractJsonString(const std::string& json, const char* key, std::string* value) {
+    std::string quotedKey = "\"";
+    quotedKey += key;
+    quotedKey += "\"";
+
+    size_t keyPos = json.find(quotedKey);
+    if (keyPos == std::string::npos) return false;
+
+    size_t colonPos = json.find(':', keyPos + quotedKey.size());
+    if (colonPos == std::string::npos) return false;
+
+    size_t pos = colonPos + 1;
+    while (pos < json.size() && std::isspace(static_cast<unsigned char>(json[pos]))) {
+        ++pos;
+    }
+    if (pos >= json.size() || json[pos] != '"') return false;
+    ++pos;
+
+    std::string parsed;
+    while (pos < json.size()) {
+        char ch = json[pos++];
+        if (ch == '"') {
+            *value = parsed;
+            return true;
+        }
+        if (ch != '\\') {
+            parsed.push_back(ch);
+            continue;
+        }
+        if (pos >= json.size()) return false;
+
+        char escaped = json[pos++];
+        switch (escaped) {
+            case '"': parsed.push_back('"'); break;
+            case '\\': parsed.push_back('\\'); break;
+            case '/': parsed.push_back('/'); break;
+            case 'b': parsed.push_back('\b'); break;
+            case 'f': parsed.push_back('\f'); break;
+            case 'n': parsed.push_back('\n'); break;
+            case 'r': parsed.push_back('\r'); break;
+            case 't': parsed.push_back('\t'); break;
+            case 'u':
+                if (pos + 4 > json.size()) return false;
+                parsed.append("\\u");
+                parsed.append(json, pos, 4);
+                pos += 4;
+                break;
+            default:
+                return false;
+        }
+    }
+
+    return false;
+}
+
 bool LoadWrapperSettingsFromFile(const std::string& wrapperPath) {
     std::string json;
     if (!ReadWholeFile(wrapperPath, &json)) {
@@ -1291,6 +1542,11 @@ bool LoadWrapperSettingsFromFile(const std::string& wrapperPath) {
     double dpadZeroHoldMs = gDpadZeroHoldMs;
     double dpadKeyboardZeroHoldMs = gDpadKeyboardZeroHoldMs;
     double debugConsoleEnabled = gDebugConsoleEnabled ? 1.0 : 0.0;
+    double customCursorEnabled = gCustomCursorEnabled ? 1.0 : 0.0;
+    std::string customCursorMousePath = gCustomCursorMousePath;
+    std::string customCursorMobaPath = gCustomCursorMobaPath;
+    std::string customCursorMobaRightPath = gCustomCursorMobaRightPath;
+    std::string customCursorBlankPath = gCustomCursorBlankPath;
     bool foundAny = false;
 
     foundAny |= ExtractJsonNumber(json, "gDebugConsoleEnabled", &debugConsoleEnabled);
@@ -1307,6 +1563,11 @@ bool LoadWrapperSettingsFromFile(const std::string& wrapperPath) {
     foundAny |= foundDpadDirectionSmoothingFactor;
     foundAny |= ExtractJsonNumber(json, "gDpadZeroHoldMs", &dpadZeroHoldMs);
     foundAny |= ExtractJsonNumber(json, "gDpadKeyboardZeroHoldMs", &dpadKeyboardZeroHoldMs);
+    foundAny |= ExtractJsonNumber(json, "gCustomCursorEnabled", &customCursorEnabled);
+    foundAny |= ExtractJsonString(json, "gCustomCursorMousePath", &customCursorMousePath);
+    foundAny |= ExtractJsonString(json, "gCustomCursorMobaPath", &customCursorMobaPath);
+    foundAny |= ExtractJsonString(json, "gCustomCursorMobaRightPath", &customCursorMobaRightPath);
+    foundAny |= ExtractJsonString(json, "gCustomCursorBlankPath", &customCursorBlankPath);
 
     if (!foundAny) {
         DebugPrint("Wrapper settings: no known settings found in %s, using defaults\n", wrapperPath.c_str());
@@ -1341,13 +1602,19 @@ bool LoadWrapperSettingsFromFile(const std::string& wrapperPath) {
     gDpadZeroHoldMs = ClampDouble(dpadZeroHoldMs, 0.0, 250.0);
     gDpadKeyboardZeroHoldMs = ClampDouble(dpadKeyboardZeroHoldMs, 0.0, 250.0);
     gDebugConsoleEnabled = debugConsoleEnabled != 0.0;
+    gCustomCursorEnabled = customCursorEnabled != 0.0;
+    gCustomCursorMousePath = customCursorMousePath;
+    gCustomCursorMobaPath = customCursorMobaPath;
+    gCustomCursorMobaRightPath = customCursorMobaRightPath;
+    gCustomCursorBlankPath = customCursorBlankPath;
     UpdateDebugConsoleVisibility();
+    ReloadCustomCursors();
     if (!gDpadFullExtensionEnabled) {
         ResetDpadSmoothingState();
     }
 
     DebugPrint(
-        "Wrapper settings loaded: debugConsole=%d MOBASkill strength=%.2f edgeWidth=%.2f anchors=(%.2f, %.2f) downwardAimYScale=(%.2f..%.2f min %.2f) dpadFullExtension=%d dpadSmoothing=%.2f dpadZeroHoldMs=%.0f dpadKeyboardZeroHoldMs=%.0f\n",
+        "Wrapper settings loaded: debugConsole=%d MOBASkill strength=%.2f edgeWidth=%.2f anchors=(%.2f, %.2f) downwardAimYScale=(%.2f..%.2f min %.2f) dpadFullExtension=%d dpadSmoothing=%.2f dpadZeroHoldMs=%.0f dpadKeyboardZeroHoldMs=%.0f customCursor=%d mouse=%s moba=%s mobaRight=%s blank=%s\n",
         static_cast<int>(gDebugConsoleEnabled),
         gMOBASkillMaxAimXBiasPercent,
         gMOBASkillEdgeThresholdPercent,
@@ -1359,7 +1626,12 @@ bool LoadWrapperSettingsFromFile(const std::string& wrapperPath) {
         static_cast<int>(gDpadFullExtensionEnabled),
         gDpadDirectionSmoothingFactor,
         gDpadZeroHoldMs,
-        gDpadKeyboardZeroHoldMs);
+        gDpadKeyboardZeroHoldMs,
+        static_cast<int>(gCustomCursorEnabled),
+        gCustomCursorMousePath.c_str(),
+        gCustomCursorMobaPath.c_str(),
+        gCustomCursorMobaRightPath.c_str(),
+        gCustomCursorBlankPath.c_str());
     return true;
 }
 
@@ -1602,6 +1874,52 @@ DWORD WINAPI MainThread(LPVOID lpReserved) {
             DebugPrint("CustomMatcher hook created at 0x%p\n", reinterpret_cast<void*>(targetFunc));
         }
 
+        HMODULE user32Module = GetModuleHandleA("user32.dll");
+        void* setCursorProc = user32Module ? reinterpret_cast<void*>(GetProcAddress(user32Module, "SetCursor")) : nullptr;
+        if (!setCursorProc) {
+            ReportHookResolutionError("Custom cursor", "user32!SetCursor could not be resolved.");
+        } else {
+            status = MH_CreateHook(
+                setCursorProc,
+                &CustomSetCursor,
+                reinterpret_cast<void**>(&pOriginalSetCursor));
+            if (status != MH_OK) {
+                LogHookError("MH_CreateHook CustomSetCursor", status);
+            } else {
+                DebugPrint(
+                    "Custom cursor hook created at 0x%p enabled=%d\n",
+                    setCursorProc,
+                    static_cast<int>(gCustomCursorEnabled));
+            }
+        }
+
+        std::vector<int> applyCursorSig = {
+            0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x74,
+            0x24, 0x10, 0x48, 0x89, 0x7c, 0x24, 0x18, 0x55,
+            0x48, 0x8d, 0x6c, 0x24, 0xe0, 0x48, 0x81, 0xec,
+            0x20, 0x01, 0x00, 0x00
+        };
+        uintptr_t applyCursorFunc = FindPattern(hMod, applyCursorSig);
+        if (!applyCursorFunc) {
+            applyCursorFunc = ModuleAddressFromRva(hMod, kBlueStacksApplyCursorRva);
+            DebugPrint(
+                "Custom cursor: applyCursor signature failed; fallback RVA resolved to 0x%p\n",
+                reinterpret_cast<void*>(applyCursorFunc));
+        }
+        if (!applyCursorFunc) {
+            ReportHookResolutionError("Custom cursor role detection", "BlueStacks cursor applicator could not be resolved.");
+        } else {
+            status = MH_CreateHook(
+                reinterpret_cast<void*>(applyCursorFunc),
+                &CustomBlueStacksApplyCursor,
+                reinterpret_cast<void**>(&pOriginalBlueStacksApplyCursor));
+            if (status != MH_OK) {
+                LogHookError("MH_CreateHook CustomBlueStacksApplyCursor", status);
+            } else {
+                DebugPrint("Custom cursor role hook created at 0x%p\n", reinterpret_cast<void*>(applyCursorFunc));
+            }
+        }
+
         if (IsRvaInsideModule(hMod, kMOBASkillComputeAimCoordsRva)) {
             std::vector<int> aimSig = {
                 0x48, 0x8b, 0xc4, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57,
@@ -1708,11 +2026,20 @@ BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserv
         gWrapperModuleHandle = hModule;
         InitializeCriticalSection(&gDesiredCfgLock);
         gDesiredCfgLockInitialized = true;
+        InitializeCriticalSection(&gCustomCursorLock);
+        gCustomCursorLockInitialized = true;
         DisableThreadLibraryCalls(hModule);
         CreateThread(nullptr, 0, MainThread, hModule, 0, nullptr);
     } else if (ul_reason_for_call == DLL_PROCESS_DETACH) {
         if (lpReserved != nullptr) {
             RestoreEditorSavedCfgsOnProcessDetach();
+        }
+        if (gCustomCursorLockInitialized) {
+            EnterCriticalSection(&gCustomCursorLock);
+            DestroyCustomCursorsLocked();
+            LeaveCriticalSection(&gCustomCursorLock);
+            DeleteCriticalSection(&gCustomCursorLock);
+            gCustomCursorLockInitialized = false;
         }
     }
     return TRUE;
