@@ -5,11 +5,15 @@ namespace BluestacksCfgEditor;
 internal sealed class WrapperSettingsForm : Form
 {
     private readonly JsonObject _document;
+    private readonly string _packageName;
     private readonly Dictionary<string, TextBox> _editors = new(StringComparer.Ordinal);
 
-    internal WrapperSettingsForm(JsonObject document)
+    internal WrapperSettingsForm(JsonObject document, string packageName)
     {
         _document = document;
+        _packageName = string.IsNullOrWhiteSpace(packageName)
+            ? ConfigDefinitions.DefaultPackage
+            : packageName.Trim();
         InitializeComponent();
         LoadValues();
     }
@@ -50,7 +54,10 @@ internal sealed class WrapperSettingsForm : Form
 
         foreach (WrapperStringSettingDefinition definition in ConfigDefinitions.WrapperStringSettings)
         {
-            AddEditor(fields, definition.Name, browseForCursorFile: true);
+            AddEditor(
+                fields,
+                definition.Name,
+                browseForCursorFile: definition.Name.Contains("Cursor", StringComparison.Ordinal));
         }
 
         Panel scrollPanel = new()
@@ -82,9 +89,17 @@ internal sealed class WrapperSettingsForm : Form
             AutoSize = true,
             Margin = new Padding(8, 0, 0, 0),
         };
+        Button probeFeetButton = new()
+        {
+            Text = "TextureCRC...",
+            AutoSize = true,
+            Margin = new Padding(8, 0, 0, 0),
+        };
         applyButton.Click += (_, _) => ApplyValues();
+        probeFeetButton.Click += (_, _) => OpenTextureCrcUpdate();
         buttons.Controls.Add(cancelButton);
         buttons.Controls.Add(applyButton);
+        buttons.Controls.Add(probeFeetButton);
         root.Controls.Add(buttons, 0, 1);
 
         AcceptButton = applyButton;
@@ -227,5 +242,11 @@ internal sealed class WrapperSettingsForm : Form
         ConfigService.ApplyWrapperStringSettings(_document, stringValues);
         DialogResult = DialogResult.OK;
         Close();
+    }
+
+    private void OpenTextureCrcUpdate()
+    {
+        using TextureCrcUpdateForm dialog = new(_packageName);
+        dialog.ShowDialog(this);
     }
 }

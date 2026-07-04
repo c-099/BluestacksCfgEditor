@@ -115,14 +115,18 @@ internal static class ConfigDefinitions
         new("gMOBASkillMaxAimXBiasPercent", 1.5),
         new("gMOBASkillLeftEdgeXPercent", 9.8),
         new("gMOBASkillRightEdgeXPercent", 90.2),
-        new("gMOBASkillAimYBiasScaleStartPercent", 12.0),
-        new("gMOBASkillAimYBiasScaleEndPercent", 30.0),
-        new("gMOBASkillAimYBiasMinScale", -1.0),
-        new("gDpadFullExtensionEnabled", 1.0),
-        new("gDpadDirectionSmoothingFactor", 0.45),
-        new("gDpadZeroHoldMs", 80.0),
-        new("gDpadKeyboardZeroHoldMs", 120.0),
         new("gCustomCursorEnabled", 0.0),
+    ];
+
+    internal static readonly IReadOnlyList<string> ObsoleteWrapperSettings =
+    [
+        "gMOBASkillAimYBiasScaleStartPercent",
+        "gMOBASkillAimYBiasScaleEndPercent",
+        "gMOBASkillAimYBiasMinScale",
+        "gDpadFullExtensionEnabled",
+        "gDpadDirectionSmoothingFactor",
+        "gDpadZeroHoldMs",
+        "gDpadKeyboardZeroHoldMs",
     ];
 
     internal static readonly IReadOnlyList<WrapperStringSettingDefinition> WrapperStringSettings =

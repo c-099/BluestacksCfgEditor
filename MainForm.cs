@@ -684,7 +684,7 @@ internal sealed class MainForm : Form
         _configPath = path;
         _wrapperSettings = ConfigService.LoadWrapperSettings(document);
         _wrapperConfigPath = ConfigService.GetWrapperConfigPath();
-        _selectedSchemeIndex = 0;
+        _selectedSchemeIndex = FindSelectedSchemeIndex(document);
         _selectedControlIndex = 0;
         RefreshSchemeList();
         RefreshControlList();
@@ -1210,7 +1210,7 @@ internal sealed class MainForm : Form
     private void OpenWrapperSettings()
     {
         _wrapperSettings = ConfigService.LoadWrapperSettings(_document ?? []);
-        using WrapperSettingsForm dialog = new(_wrapperSettings);
+        using WrapperSettingsForm dialog = new(_wrapperSettings, _packageComboBox.Text.Trim());
         if (dialog.ShowDialog(this) == DialogResult.OK)
         {
             string packageName = _packageComboBox.Text.Trim();
@@ -1558,6 +1558,25 @@ internal sealed class MainForm : Form
 
     private JsonArray? GetControlSchemes() =>
         _document?["ControlSchemes"] as JsonArray;
+
+    private static int FindSelectedSchemeIndex(JsonObject document)
+    {
+        if (document["ControlSchemes"] is not JsonArray schemes)
+        {
+            return 0;
+        }
+
+        for (int i = 0; i < schemes.Count; i++)
+        {
+            if (schemes[i] is JsonObject scheme
+                && scheme["Selected"]?.GetValue<bool?>() == true)
+            {
+                return i;
+            }
+        }
+
+        return 0;
+    }
 
     private JsonObject? GetSelectedScheme()
     {

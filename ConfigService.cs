@@ -278,6 +278,8 @@ internal static class ConfigService
 
     private static void EnsureWrapperSettingDefaults(JsonObject wrapper)
     {
+        RemoveObsoleteWrapperSettings(wrapper);
+
         foreach (WrapperSettingDefinition definition in ConfigDefinitions.WrapperSettings)
         {
             if (wrapper[definition.Name] is null)
@@ -299,16 +301,14 @@ internal static class ConfigService
 
     private static void NormalizeWrapperSettings(JsonObject wrapper)
     {
-        if (TryGetDouble(wrapper["gMOBASkillAimYBiasMinScale"], out double aimYMinScale) &&
-            aimYMinScale >= 0.0)
-        {
-            wrapper["gMOBASkillAimYBiasMinScale"] = -1.0;
-        }
+        RemoveObsoleteWrapperSettings(wrapper);
+    }
 
-        if (TryGetDouble(wrapper["gDpadDirectionSmoothingFactor"], out double smoothingFactor) &&
-            (smoothingFactor < 0.0 || smoothingFactor > 1.0))
+    private static void RemoveObsoleteWrapperSettings(JsonObject wrapper)
+    {
+        foreach (string name in ConfigDefinitions.ObsoleteWrapperSettings)
         {
-            wrapper["gDpadDirectionSmoothingFactor"] = 0.45;
+            wrapper.Remove(name);
         }
     }
 

@@ -9,6 +9,66 @@ Date: 2026-06-26
 - Image base: `0x140000000`
 - SHA-256: `8f7112edc8a525ac7cce07521a46f119e32bde32126f9917302d9a5ad8b3918f`
 
+## Texture Dump / `bst.image_dump_pkg` IDA Pass
+
+Date: 2026-07-01
+
+### IDA Work Performed
+
+- Used the `image_dump_pkg`, `imgd_min_tex_size`, `imgd_use_two_texcrc`, `CRC_0x...png`, and Imgd log strings as anchors.
+- Renamed the key functions:
+  - `Conf_RegisterDefaultBstProperties` at `0x140252090`
+  - `Conf_RegisterBstProperty` at `0x14024D7F0`
+  - `StdString_FromCString` at `0x140025770`
+  - `Imgd_GlobalInit` at `0x14035A280`
+  - `Imgd_InitDumpDirectory` at `0x14035A2C0`
+  - `Imgd_LoadConfigSettings` at `0x14035A460`
+  - `Imgd_RegisterGameTextureNameOverrides` at `0x14035A7E0`
+  - `ImgdContext_ConstructForEglContext` at `0x140356330`
+  - `Imgd_OnEglCreateContext` at `0x14035B610`
+  - `Imgd_IsPackageSupportedForImageDetect` at `0x140359CE0`
+  - `Imgd_SaveTextureAsPng` at `0x14035C530`
+  - `Imgd_UpdateCompressedTextureCrc` at `0x14035C7C0`
+  - `Imgd_UpdateUncompressedTextureCrc` at `0x14035CAB0`
+  - `Imgd_OnTexImage2D` at `0x14035BF70`
+  - `Imgd_OnTexSubImage2D` at `0x14035C310`
+  - `Imgd_UpdateScreenPoint` at `0x14035C8A0`
+  - `Imgd_DumpPickedTexture` at `0x140358690`
+  - `Imgd_DetectImageInTexture` at `0x140358CF0`
+- Renamed globals:
+  - `g_imgd_state` at `0x141A71640`
+  - `g_imgd_pick_state` at `0x141A71648`
+- Applied function signatures to the Imgd save and CRC paths, including pointer and array arguments for `pixelData`, `compressedData`, and `crcPair[2]`.
+- Renamed important arguments in the save/CRC/context functions, including `width`, `height`, `bytesPerPixel`, `pixelData`, `totalCrc`, `first64kCrc`, `format`, `type`, `crcPair`, `eglContext`, and `forceCreate`.
+- Added IDA comments at the config registration, config read, package-filter copy, min-size gate, CRC computation, and PNG filename format sites.
+- Used the IDA `int_convert` MCP tool for base/ASCII conversions; no manual number-base conversion was used.
+
+### Findings
+
+- `bst.image_dump_pkg` is registered as a default config property in `Conf_RegisterDefaultBstProperties`. The default is an empty string.
+- `ImgdContext_ConstructForEglContext` later reads `bst.image_dump_pkg` and copies it into `g_imgd_state + 0x60`, an `std::string`-shaped package filter.
+- Texture PNG saving is gated by that package filter. In the TexImage/TexSubImage paths, BlueStacks checks that the filter string length is greater than one and compares it before calling `Imgd_SaveTextureAsPng`.
+- The dump directory is built by `Imgd_InitDumpDirectory` as `<BlueStacks data root>\Logs\image`.
+- `bst.imgd_min_tex_size` is read in `Imgd_LoadConfigSettings` into `g_imgd_state + 0x54`. `Imgd_SaveTextureAsPng` only writes a PNG when `width >= minTexSize` or `height >= minTexSize`.
+- `bst.imgd_use_two_texcrc` is read into `g_imgd_state + 0x58`. When enabled, filenames use `CRC_0x<first64k>_0x<total>_<W>X<H>.png`; otherwise they use `CRC_0x<total>_<W>X<H>.png`.
+- In `Imgd_UpdateUncompressedTextureCrc`, the two-CRC path computes `crcPair[1]` over at most the first `0x10000` bytes and normally computes `crcPair[0]` over the full texture.
+- There is a Brawl Stars special case: `ImgdContext_ConstructForEglContext` sets `g_imgd_state + 0x80` when the package is `com.supercell.brawlstars`.
+- With that special-case flag enabled and `bst.image_dump_pkg` empty, exact `2048x2048` and exact `4096x4096` uncompressed textures skip the full CRC store. Other sizes still compute the full CRC.
+
+### Practical Control Points
+
+- To dump only high-resolution Brawl Stars textures, set:
+  - `bst.image_dump_pkg="com.supercell.brawlstars"`
+  - `bst.imgd_min_tex_size="2048"` for both `2048x2048` and `4096x4096`, or `bst.imgd_min_tex_size="4096"` for only `4096x4096`.
+  - `bst.imgd_use_two_texcrc="1"` if the wrapper/tooling should see both the first-64KB CRC and full CRC in dump names.
+- BlueStacks must still allocate/use the high-resolution texture. The game-side high-res path depends on the BlueStacks RAM setting; the observed Brawl Stars high-res path requires the 8 GB RAM setting.
+- Toggling `bst.image_dump_pkg` in `bluestacks.conf` is not polled continuously in the Imgd hot path. The value is loaded into `g_imgd_state + 0x60` when Imgd config/context setup runs.
+- Runtime enable/disable options derived from the decompilation:
+  - Trigger a path that reruns Imgd setup/context construction after editing `bluestacks.conf`.
+  - Patch the live `g_imgd_state + 0x60` string in memory to the package name to enable dumping, and clear it to disable dumping.
+  - Patch `g_imgd_state + 0x54` live to change the minimum texture size without restarting.
+- The clean wrapper path is to add a small runtime control that updates these Imgd globals directly, guarded by the same version/signature checks used for other wrapper targets. That avoids restarting BlueStacks and avoids relying on config polling that the decompilation did not show.
+
 ## Updated Wrapper Targets
 
 | Wrapper target | New RVA | IDA name applied | Signature status |

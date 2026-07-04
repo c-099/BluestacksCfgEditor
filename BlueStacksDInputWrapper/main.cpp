@@ -7,10 +7,10 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdarg>
-#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
+#include <intrin.h>
 #include <iterator>
 #include <string>
 #include <utility>
@@ -66,17 +66,43 @@ struct ImgdState {
 typedef uint8_t(*MatcherFn)(ImgdState*, int, short*, int, uint32_t);
 MatcherFn pOriginalMatcher = nullptr;
 
+void LogImageMarkerProbeCall(
+    void* callerReturnAddress,
+    ImgdState* state,
+    int mode,
+    int p4,
+    uint32_t mc,
+    void* idxData,
+    uint32_t idxType,
+    int stride);
+
+void LogImageMarkerProbeScan(
+    void* callerReturnAddress,
+    ImgdState* state,
+    int mode,
+    int p4,
+    uint32_t mc,
+    void* idxData,
+    uint32_t idxType,
+    int stride);
+
+void LogImageMarkerProbeMatch(
+    void* callerReturnAddress,
+    ImgdState* state,
+    int mode,
+    int p4,
+    uint32_t mc,
+    void* idxData,
+    uint32_t idxType,
+    int stride,
+    uint32_t streamIndex,
+    uint32_t v0,
+    uint32_t v1,
+    uint32_t v2,
+    const uint8_t* colorPtr);
+
 typedef void(*MOBASkillComputeAimCoordsFn)(void*, int, int, double*, double*, char);
 MOBASkillComputeAimCoordsFn pOriginalMOBASkillComputeAimCoords = nullptr;
-
-typedef __int64(__fastcall *DpadHandleGamepadAnalogMoveFn)(void*, int, float*);
-DpadHandleGamepadAnalogMoveFn pOriginalDpadHandleGamepadAnalogMove = nullptr;
-
-typedef __int64(__fastcall *DpadHandleKeyEventFn)(void*, __int64, int);
-DpadHandleKeyEventFn pOriginalDpadHandleKeyEvent = nullptr;
-
-typedef __int64(__fastcall *DpadUpdateVirtualJoystickTouchFn)(void*, char);
-DpadUpdateVirtualJoystickTouchFn pDpadUpdateVirtualJoystickTouch = nullptr;
 
 typedef HCURSOR(WINAPI *SetCursorFn)(HCURSOR);
 SetCursorFn pOriginalSetCursor = nullptr;
@@ -89,7 +115,7 @@ void ReportHookResolutionError(const char* targetName, const char* detail);
 // Replacement for HD-Player's Imgd color marker matcher.
 // This intentionally keeps the working runtime behavior from the original
 // patch, even where it differs from the cleaner Ghidra decompile.
-uint8_t CustomMatcherImpl(ImgdState* state, int mode, short* outIdx, int p4, uint32_t mc) {
+uint8_t CustomMatcherImpl(ImgdState* state, int mode, short* outIdx, int p4, uint32_t mc, void* callerReturnAddress) {
     // Low-risk safety guards. Do not add the Ghidra-only flag/mode guards here
     // without testing; those changed behavior in a way that broke detection.
     if (!state || !outIdx) return 0;
@@ -116,6 +142,25 @@ uint8_t CustomMatcherImpl(ImgdState* state, int mode, short* outIdx, int p4, uin
         idxData = *(void**)state->idxStruct;
         idxType = state->idxStruct->type;
     }
+
+    LogImageMarkerProbeCall(
+        callerReturnAddress,
+        state,
+        mode,
+        p4,
+        mc,
+        idxData,
+        idxType,
+        stride);
+    LogImageMarkerProbeScan(
+        callerReturnAddress,
+        state,
+        mode,
+        p4,
+        mc,
+        idxData,
+        idxType,
+        stride);
 
     // mc is packed as 0xRRGGBBAA and compared byte-for-byte against the first
     // resolved vertex color in each candidate triangle.
@@ -154,6 +199,20 @@ uint8_t CustomMatcherImpl(ImgdState* state, int mode, short* outIdx, int p4, uin
         // expects texture-coordinate/index positions.
         uint8_t* cPtr = colorBuf + (v0 * stride);
         if (cPtr[0] == t0 && cPtr[1] == t1 && cPtr[2] == t2 && cPtr[3] == t3) {
+            LogImageMarkerProbeMatch(
+                callerReturnAddress,
+                state,
+                mode,
+                p4,
+                mc,
+                idxData,
+                idxType,
+                stride,
+                endIdx,
+                v0,
+                v1,
+                v2,
+                cPtr);
             outIdx[0] = endIdx; outIdx[1] = endIdx + 1; outIdx[2] = endIdx + 2;
             // Advance past the matched triplet so repeated calls do not return
             // the same marker forever.
@@ -167,7 +226,7 @@ uint8_t CustomMatcherImpl(ImgdState* state, int mode, short* outIdx, int p4, uin
 
 uint8_t CustomMatcher(ImgdState* state, int mode, short* outIdx, int p4, uint32_t mc) {
     __try {
-        return CustomMatcherImpl(state, mode, outIdx, p4, mc);
+        return CustomMatcherImpl(state, mode, outIdx, p4, mc, _ReturnAddress());
     } __except (EXCEPTION_EXECUTE_HANDLER) {
         ReportHookResolutionError("Imgd_FindColorMarkerTriangle", "The hook hit an exception while reading the updated runtime layout.");
         return 0;
@@ -178,9 +237,6 @@ uint8_t CustomMatcher(ImgdState* state, int mode, short* outIdx, int p4, uint32_
 // 3. BRAWL STARS MOBASKILL AIM COMPENSATION
 // ========================================================================
 constexpr uintptr_t kMOBASkillComputeAimCoordsRva = 0x3C5690;
-constexpr uintptr_t kDpadHandleGamepadAnalogMoveRva = 0xCED010;
-constexpr uintptr_t kDpadHandleKeyEventRva = 0xCED320;
-constexpr uintptr_t kDpadUpdateVirtualJoystickTouchRva = 0xCECC70;
 constexpr uintptr_t kBlueStacksApplyCursorRva = 0xF71E0;
 constexpr double kMOBASkillScreenPercentMax = 100.0;
 double gMOBASkillEdgeThresholdPercent = 25.0;
@@ -188,23 +244,17 @@ double gMOBASkillMaxAimXBiasPercent = 1.5;
 DWORD gMOBASkillLastDebugPrintTick = 0;
 double gMOBASkillLeftEdgeXPercent = 9.8;
 double gMOBASkillRightEdgeXPercent = 90.2;
-double gMOBASkillAimYBiasScaleStartPercent = 12.0;
-double gMOBASkillAimYBiasScaleEndPercent = 30.0;
-double gMOBASkillAimYBiasMinScale = -1.0;
-bool gDpadFullExtensionEnabled = true;
-double gDpadDirectionSmoothingFactor = 0.45;
-double gDpadZeroHoldMs = 80.0;
-double gDpadKeyboardZeroHoldMs = 120.0;
-DWORD gDpadLastDebugPrintTick = 0;
-DWORD gDpadKeyboardLastDebugPrintTick = 0;
 bool gDebugConsoleEnabled = false;
 bool gDebugConsoleAttached = false;
 bool gHookResolutionErrorShown = false;
 bool gCustomCursorEnabled = false;
+bool gImageMarkerProbeEnabled = false;
+uint32_t gImageMarkerProbeColor = 0x48E03400;
 std::string gCustomCursorMousePath;
 std::string gCustomCursorMobaPath;
 std::string gCustomCursorMobaRightPath;
 std::string gCustomCursorBlankPath;
+std::string gImageMarkerProbeLogPath;
 HCURSOR gCustomCursorMouseHandle = nullptr;
 HCURSOR gCustomCursorMobaHandle = nullptr;
 HCURSOR gCustomCursorMobaRightHandle = nullptr;
@@ -212,6 +262,9 @@ HCURSOR gCustomCursorBlankHandle = nullptr;
 CRITICAL_SECTION gCustomCursorLock = {};
 bool gCustomCursorLockInitialized = false;
 LONG gActiveBlueStacksCursorRole = 0;
+LONG gImageMarkerProbeCallLogCount = 0;
+LONG gImageMarkerProbeMatchLogCount = 0;
+DWORD gImageMarkerProbeLastCallLogTick = 0;
 
 enum BlueStacksCursorRole {
     kBlueStacksCursorRoleMouse = 0,
@@ -220,25 +273,6 @@ enum BlueStacksCursorRole {
     kBlueStacksCursorRoleBlank = 3,
 };
 
-struct DpadStickSmoothingState {
-    bool hasDirection = false;
-    double x = 0.0;
-    double y = 0.0;
-    DWORD lastInputTick = 0;
-};
-
-DpadStickSmoothingState gDpadLeftStickState;
-DpadStickSmoothingState gDpadRightStickState;
-
-struct DpadKeyboardHoldState {
-    void* runtime = nullptr;
-    bool hasDirection = false;
-    double xOffset = 0.0;
-    double yOffset = 0.0;
-    DWORD lastInputTick = 0;
-};
-
-DpadKeyboardHoldState gDpadKeyboardHoldState;
 HMODULE gWrapperModuleHandle = nullptr;
 
 double ClampDouble(double value, double minValue, double maxValue) {
@@ -471,220 +505,6 @@ void ReportHookResolutionError(const char* targetName, const char* detail) {
     }
 }
 
-void ResetDpadSmoothingState() {
-    gDpadLeftStickState = {};
-    gDpadRightStickState = {};
-    gDpadKeyboardHoldState = {};
-}
-
-bool NormalizeAndSmoothAnalogPair(
-    float* analogState,
-    size_t xIndex,
-    size_t yIndex,
-    DpadStickSmoothingState* state,
-    DWORD now,
-    const char** mode) {
-
-    *mode = "none";
-    double x = analogState[xIndex];
-    double y = analogState[yIndex];
-    double length = std::sqrt((x * x) + (y * y));
-    if (!std::isfinite(length)) {
-        state->hasDirection = false;
-        *mode = "reset";
-        return false;
-    }
-
-    if (length <= 0.0001) {
-        DWORD elapsed = now - state->lastInputTick;
-        if (state->hasDirection && elapsed <= static_cast<DWORD>(gDpadZeroHoldMs)) {
-            analogState[xIndex] = static_cast<float>(state->x);
-            analogState[yIndex] = static_cast<float>(state->y);
-            *mode = "hold";
-            return true;
-        }
-
-        state->hasDirection = false;
-        return false;
-    }
-
-    double targetX = x / length;
-    double targetY = y / length;
-    double outputX = targetX;
-    double outputY = targetY;
-    double smoothingFactor = ClampDouble(gDpadDirectionSmoothingFactor, 0.0, 1.0);
-
-    if (state->hasDirection && smoothingFactor < 1.0) {
-        outputX = state->x + ((targetX - state->x) * smoothingFactor);
-        outputY = state->y + ((targetY - state->y) * smoothingFactor);
-        double outputLength = std::sqrt((outputX * outputX) + (outputY * outputY));
-        if (std::isfinite(outputLength) && outputLength > 0.0001) {
-            outputX /= outputLength;
-            outputY /= outputLength;
-            *mode = "smooth";
-        } else {
-            outputX = targetX;
-            outputY = targetY;
-            *mode = "snap";
-        }
-    } else {
-        *mode = "snap";
-    }
-
-    state->hasDirection = true;
-    state->x = outputX;
-    state->y = outputY;
-    state->lastInputTick = now;
-    analogState[xIndex] = static_cast<float>(outputX);
-    analogState[yIndex] = static_cast<float>(outputY);
-    return true;
-}
-
-// Hook for HD-Player's normal ImapRtDpad gamepad analog movement handler.
-// BlueStacks normally scales the virtual joystick by raw analog magnitude.
-// Brawl Stars movement needs the stick endpoint on the outer circle whenever
-// movement is nonzero, so this normalizes the temporary analog state before the
-// original handler computes and emits the virtual touch.
-__int64 __fastcall CustomDpadHandleGamepadAnalogMoveImpl(
-    void* runtime,
-    int analogChannel,
-    float* analogState) {
-
-    if (!pOriginalDpadHandleGamepadAnalogMove) return 0;
-    if (!gDpadFullExtensionEnabled || !analogState) {
-        return pOriginalDpadHandleGamepadAnalogMove(runtime, analogChannel, analogState);
-    }
-
-    float normalizedAnalogState[9] = {};
-    std::memcpy(normalizedAnalogState, analogState, sizeof(normalizedAnalogState));
-
-    DWORD now = GetTickCount();
-    const char* leftMode = "none";
-    const char* rightMode = "none";
-    bool changedLeft = NormalizeAndSmoothAnalogPair(
-        normalizedAnalogState,
-        5,
-        6,
-        &gDpadLeftStickState,
-        now,
-        &leftMode);
-    bool changedRight = NormalizeAndSmoothAnalogPair(
-        normalizedAnalogState,
-        7,
-        8,
-        &gDpadRightStickState,
-        now,
-        &rightMode);
-
-    if ((changedLeft || changedRight) && now - gDpadLastDebugPrintTick >= 250) {
-        gDpadLastDebugPrintTick = now;
-        DebugPrint(
-            "Dpad full-extension active channel=%d smoothing=%.2f zeroHoldMs=%.0f left[%s]=(%.3f, %.3f)->(%.3f, %.3f) right[%s]=(%.3f, %.3f)->(%.3f, %.3f)\n",
-            analogChannel,
-            gDpadDirectionSmoothingFactor,
-            gDpadZeroHoldMs,
-            leftMode,
-            analogState[5],
-            analogState[6],
-            normalizedAnalogState[5],
-            normalizedAnalogState[6],
-            rightMode,
-            analogState[7],
-            analogState[8],
-            normalizedAnalogState[7],
-            normalizedAnalogState[8]);
-    }
-
-    return pOriginalDpadHandleGamepadAnalogMove(runtime, analogChannel, normalizedAnalogState);
-}
-
-__int64 __fastcall CustomDpadHandleGamepadAnalogMove(
-    void* runtime,
-    int analogChannel,
-    float* analogState) {
-
-    __try {
-        return CustomDpadHandleGamepadAnalogMoveImpl(runtime, analogChannel, analogState);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        ReportHookResolutionError("ImapRtDpad_handleGamepadAnalogMove", "The hook hit an exception while handling the updated runtime layout.");
-        return 0;
-    }
-}
-
-bool IsNonZeroDpadOffset(double xOffset, double yOffset) {
-    return std::fabs(xOffset) > 0.0001 || std::fabs(yOffset) > 0.0001;
-}
-
-// Hook for HD-Player's normal ImapRtDpad keyboard path. The original handler
-// already computes full-radius offsets for WASD directions, so this only
-// bridges brief zero-direction samples that can happen while changing keys.
-__int64 __fastcall CustomDpadHandleKeyEventImpl(
-    void* runtime,
-    __int64 keyEvent,
-    int eventKind) {
-
-    if (!pOriginalDpadHandleKeyEvent) return 0;
-
-    __int64 result = pOriginalDpadHandleKeyEvent(runtime, keyEvent, eventKind);
-    if (!gDpadFullExtensionEnabled || !runtime || !pDpadUpdateVirtualJoystickTouch) {
-        return result;
-    }
-
-    auto* runtimeBytes = reinterpret_cast<uint8_t*>(runtime);
-    double* xOffsetPtr = reinterpret_cast<double*>(runtimeBytes + 0x118);
-    double* yOffsetPtr = reinterpret_cast<double*>(runtimeBytes + 0x120);
-    double xOffset = *xOffsetPtr;
-    double yOffset = *yOffsetPtr;
-    DWORD now = GetTickCount();
-
-    if (IsNonZeroDpadOffset(xOffset, yOffset)) {
-        gDpadKeyboardHoldState.runtime = runtime;
-        gDpadKeyboardHoldState.hasDirection = true;
-        gDpadKeyboardHoldState.xOffset = xOffset;
-        gDpadKeyboardHoldState.yOffset = yOffset;
-        gDpadKeyboardHoldState.lastInputTick = now;
-        return result;
-    }
-
-    DWORD elapsed = now - gDpadKeyboardHoldState.lastInputTick;
-    if (gDpadKeyboardHoldState.hasDirection &&
-        gDpadKeyboardHoldState.runtime == runtime &&
-        elapsed <= static_cast<DWORD>(gDpadKeyboardZeroHoldMs)) {
-
-        *xOffsetPtr = gDpadKeyboardHoldState.xOffset;
-        *yOffsetPtr = gDpadKeyboardHoldState.yOffset;
-        result = pDpadUpdateVirtualJoystickTouch(runtime, 1);
-
-        if (now - gDpadKeyboardLastDebugPrintTick >= 250) {
-            gDpadKeyboardLastDebugPrintTick = now;
-            DebugPrint(
-                "Dpad keyboard zero-bridge active eventKind=%d elapsed=%lu zeroHoldMs=%.0f heldOffset=(%.3f, %.3f)\n",
-                eventKind,
-                static_cast<unsigned long>(elapsed),
-                gDpadKeyboardZeroHoldMs,
-                gDpadKeyboardHoldState.xOffset,
-                gDpadKeyboardHoldState.yOffset);
-        }
-    } else if (elapsed > static_cast<DWORD>(gDpadKeyboardZeroHoldMs)) {
-        gDpadKeyboardHoldState.hasDirection = false;
-    }
-
-    return result;
-}
-
-__int64 __fastcall CustomDpadHandleKeyEvent(
-    void* runtime,
-    __int64 keyEvent,
-    int eventKind) {
-
-    __try {
-        return CustomDpadHandleKeyEventImpl(runtime, keyEvent, eventKind);
-    } __except (EXCEPTION_EXECUTE_HANDLER) {
-        ReportHookResolutionError("ImapRtDpad_handleKeyEvent", "The hook hit an exception while handling the updated runtime layout.");
-        return 0;
-    }
-}
-
 // Hook for HD-Player's ImapMOBASkillComputeAimCoords. The original function
 // computes the virtual skill-stick endpoint from mouse coordinates. After the
 // original math runs, this nudges only the X endpoint when the character is
@@ -725,7 +545,6 @@ void CustomMOBASkillComputeAimCoordsImpl(
 
     double xBias = 0.0;
     double closeness = 0.0;
-    double aimYScale = 1.0;
     double leftEdgeEnd = gMOBASkillLeftEdgeXPercent + gMOBASkillEdgeThresholdPercent;
     double rightEdgeStart = gMOBASkillRightEdgeXPercent - gMOBASkillEdgeThresholdPercent;
 
@@ -742,20 +561,10 @@ void CustomMOBASkillComputeAimCoordsImpl(
     }
 
     if (xBias != 0.0) {
-        // Scale by shot direction, not absolute screen Y. This keeps edge
-        // compensation stable across maps/control origins. Positive Y is
-        // downward, where the horizontal edge correction needs to reverse.
-        if (aimDeltaYPercent > 0.0) {
-            aimYScale = gMOBASkillAimYBiasMinScale;
-        } else if (aimDeltaYPercent > gMOBASkillAimYBiasScaleStartPercent) {
-            double scaleRange = gMOBASkillAimYBiasScaleEndPercent - gMOBASkillAimYBiasScaleStartPercent;
-            if (scaleRange > 0.0) {
-                double t = (aimDeltaYPercent - gMOBASkillAimYBiasScaleStartPercent) / scaleRange;
-                t = ClampDouble(t, 0.0, 1.0);
-                aimYScale = 1.0 - (t * (1.0 - gMOBASkillAimYBiasMinScale));
-            }
+        bool reversedForDownwardAim = aimDeltaYPercent > 0.0;
+        if (reversedForDownwardAim) {
+            xBias = -xBias;
         }
-        xBias *= aimYScale;
 
         // Do not clamp the aim endpoint to 0..100. The original function can
         // intentionally return values outside screen percent bounds for long
@@ -766,8 +575,9 @@ void CustomMOBASkillComputeAimCoordsImpl(
     DWORD now = GetTickCount();
     if (now - gMOBASkillLastDebugPrintTick >= 100) {
         gMOBASkillLastDebugPrintTick = now;
+        bool reversedForDownwardAim = xBias != 0.0 && aimDeltaYPercent > 0.0;
         DebugPrint(
-            "MOBASkill pos=(%.2f, %.2f) origin=(%.2f, %.2f) aimDelta=(%.2f, %.2f) edgeAnchors=(%.2f, %.2f) edgeZones=(%.2f..%.2f, %.2f..%.2f) mouse=(%d,%d) aim=(%.2f, %.2f)->(%.2f, %.2f) closeness=%.2f aimYScale=%.2f xBias=%.2f strength=%.2f edgeWidth=%.2f deadzone=%d\n",
+            "MOBASkill pos=(%.2f, %.2f) origin=(%.2f, %.2f) aimDelta=(%.2f, %.2f) edgeAnchors=(%.2f, %.2f) edgeZones=(%.2f..%.2f, %.2f..%.2f) mouse=(%d,%d) aim=(%.2f, %.2f)->(%.2f, %.2f) closeness=%.2f reversedDown=%d xBias=%.2f strength=%.2f edgeWidth=%.2f deadzone=%d\n",
             characterXPercent,
             characterYPercent,
             originXPercent,
@@ -787,7 +597,7 @@ void CustomMOBASkillComputeAimCoordsImpl(
             *outAimX,
             outAimY ? *outAimY : 0.0,
             closeness,
-            aimYScale,
+            static_cast<int>(reversedForDownwardAim),
             xBias,
             gMOBASkillMaxAimXBiasPercent,
             gMOBASkillEdgeThresholdPercent,
@@ -934,6 +744,237 @@ std::string GetWrapperCfgPath() {
         root.pop_back();
     }
     return root + "\\Engine\\UserData\\dinput8-config.json";
+}
+
+std::string GetDefaultImageMarkerProbeLogPath() {
+    std::string root = GetBlueStacksDataRoot();
+    while (!root.empty() && (root.back() == '\\' || root.back() == '/')) {
+        root.pop_back();
+    }
+    return root + "\\Engine\\UserData\\dinput8-image-marker-probe.log";
+}
+
+std::string GetImageMarkerProbeLogPath() {
+    if (!gImageMarkerProbeLogPath.empty()) {
+        return gImageMarkerProbeLogPath;
+    }
+    return GetDefaultImageMarkerProbeLogPath();
+}
+
+void AppendImageMarkerProbeLogLine(const char* line) {
+    if (!line || line[0] == '\0') return;
+
+    std::string path = GetImageMarkerProbeLogPath();
+    HANDLE file = CreateFileA(
+        path.c_str(),
+        FILE_APPEND_DATA,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (file == INVALID_HANDLE_VALUE) {
+        return;
+    }
+
+    DWORD written = 0;
+    DWORD length = static_cast<DWORD>(std::strlen(line));
+    WriteFile(file, line, length, &written, nullptr);
+    CloseHandle(file);
+}
+
+void LogImageMarkerProbeCall(
+    void* callerReturnAddress,
+    ImgdState* state,
+    int mode,
+    int p4,
+    uint32_t mc,
+    void* idxData,
+    uint32_t idxType,
+    int stride) {
+
+    if (!gImageMarkerProbeEnabled || mc != gImageMarkerProbeColor || !state) return;
+
+    LONG count = InterlockedIncrement(&gImageMarkerProbeCallLogCount);
+    DWORD now = GetTickCount();
+    if (count > 50 && now - gImageMarkerProbeLastCallLogTick < 1000) {
+        return;
+    }
+    gImageMarkerProbeLastCallLogTick = now;
+
+    char line[768] = {};
+    sprintf_s(
+        line,
+        "CALL tick=%lu count=%ld caller=%p state=%p mode=%d p4=%d mc=0x%08X cursor=%u maxVerts=%d stride=%d comp=%d type=0x%X flag=0x%02X idxStruct=%p idxData=%p idxType=0x%X colorBuf=%p\n",
+        static_cast<unsigned long>(now),
+        static_cast<long>(count),
+        callerReturnAddress,
+        state,
+        mode,
+        p4,
+        mc,
+        state->cursor,
+        state->maxVerts,
+        stride,
+        state->compCount,
+        state->type,
+        state->flag,
+        state->idxStruct,
+        idxData,
+        idxType,
+        state->colorBuf);
+    AppendImageMarkerProbeLogLine(line);
+}
+
+template<typename T>
+int FindFirstIndexPosition(const T* data, uint32_t maxEntries, uint32_t vertex) {
+    if (!data) return -1;
+    for (uint32_t i = 0; i < maxEntries; ++i) {
+        if (static_cast<uint32_t>(data[i]) == vertex) {
+            return static_cast<int>(i);
+        }
+    }
+    return -1;
+}
+
+void LogImageMarkerProbeScan(
+    void* callerReturnAddress,
+    ImgdState* state,
+    int mode,
+    int p4,
+    uint32_t mc,
+    void* idxData,
+    uint32_t idxType,
+    int stride) {
+
+    if (!gImageMarkerProbeEnabled || mc != gImageMarkerProbeColor || !state || !state->colorBuf) return;
+
+    // CALL logging is already throttled. Reuse that count so the deeper scan
+    // happens only on the first few probe hits plus occasional later samples.
+    LONG callCount = gImageMarkerProbeCallLogCount;
+    if (callCount > 60 && (callCount % 50) != 0) {
+        return;
+    }
+
+    uint8_t t0 = (mc >> 24) & 0xFF;
+    uint8_t t1 = (mc >> 16) & 0xFF;
+    uint8_t t2 = (mc >> 8) & 0xFF;
+    uint8_t t3 = mc & 0xFF;
+
+    uint32_t maxVerts = state->maxVerts > 0 ? static_cast<uint32_t>(state->maxVerts) : 0;
+    uint32_t exactCount = 0;
+    char details[512] = {};
+    size_t used = 0;
+
+    for (uint32_t vertex = 0; vertex < maxVerts; ++vertex) {
+        const uint8_t* cPtr = state->colorBuf + (vertex * stride);
+        if (cPtr[0] != t0 || cPtr[1] != t1 || cPtr[2] != t2 || cPtr[3] != t3) {
+            continue;
+        }
+
+        int pos8 = -1;
+        int pos16 = -1;
+        int pos32 = -1;
+        if (idxData) {
+            pos8 = FindFirstIndexPosition(reinterpret_cast<const uint8_t*>(idxData), maxVerts, vertex);
+            pos16 = FindFirstIndexPosition(reinterpret_cast<const uint16_t*>(idxData), maxVerts, vertex);
+            pos32 = FindFirstIndexPosition(reinterpret_cast<const uint32_t*>(idxData), maxVerts, vertex);
+        }
+
+        if (exactCount < 8) {
+            int written = sprintf_s(
+                details + used,
+                sizeof(details) - used,
+                " v%u(idx8=%d idx16=%d idx32=%d)",
+                vertex,
+                pos8,
+                pos16,
+                pos32);
+            if (written > 0) {
+                used += static_cast<size_t>(written);
+                if (used >= sizeof(details)) {
+                    used = sizeof(details) - 1;
+                }
+            }
+        }
+        ++exactCount;
+    }
+
+    char line[1024] = {};
+    sprintf_s(
+        line,
+        "SCAN tick=%lu caller=%p state=%p mode=%d p4=%d mc=0x%08X exactVertices=%u cursor=%u maxVerts=%u stride=%d idxType=0x%X idxData=%p%s\n",
+        static_cast<unsigned long>(GetTickCount()),
+        callerReturnAddress,
+        state,
+        mode,
+        p4,
+        mc,
+        exactCount,
+        state->cursor,
+        maxVerts,
+        stride,
+        idxType,
+        idxData,
+        details);
+    AppendImageMarkerProbeLogLine(line);
+}
+
+void LogImageMarkerProbeMatch(
+    void* callerReturnAddress,
+    ImgdState* state,
+    int mode,
+    int p4,
+    uint32_t mc,
+    void* idxData,
+    uint32_t idxType,
+    int stride,
+    uint32_t streamIndex,
+    uint32_t v0,
+    uint32_t v1,
+    uint32_t v2,
+    const uint8_t* colorPtr) {
+
+    if (!gImageMarkerProbeEnabled || mc != gImageMarkerProbeColor || !state || !colorPtr) return;
+
+    LONG count = InterlockedIncrement(&gImageMarkerProbeMatchLogCount);
+    if (count > 500) {
+        return;
+    }
+
+    DWORD now = GetTickCount();
+    char line[1024] = {};
+    sprintf_s(
+        line,
+        "MATCH tick=%lu count=%ld caller=%p state=%p mode=%d p4=%d mc=0x%08X stream=(%u,%u,%u) vertices=(%u,%u,%u) color=(%02X,%02X,%02X,%02X) cursorBefore=%u maxVerts=%d stride=%d comp=%d type=0x%X flag=0x%02X idxStruct=%p idxData=%p idxType=0x%X colorBuf=%p\n",
+        static_cast<unsigned long>(now),
+        static_cast<long>(count),
+        callerReturnAddress,
+        state,
+        mode,
+        p4,
+        mc,
+        streamIndex,
+        streamIndex + 1,
+        streamIndex + 2,
+        v0,
+        v1,
+        v2,
+        colorPtr[0],
+        colorPtr[1],
+        colorPtr[2],
+        colorPtr[3],
+        state->cursor,
+        state->maxVerts,
+        stride,
+        state->compCount,
+        state->type,
+        state->flag,
+        state->idxStruct,
+        idxData,
+        idxType,
+        state->colorBuf);
+    AppendImageMarkerProbeLogLine(line);
 }
 
 std::string GetBrawlStarsReloadRequestPath() {
@@ -1523,6 +1564,31 @@ bool ExtractJsonString(const std::string& json, const char* key, std::string* va
     return false;
 }
 
+bool ExtractJsonUInt32(const std::string& json, const char* key, uint32_t* value) {
+    double numericValue = 0.0;
+    if (ExtractJsonNumber(json, key, &numericValue) &&
+        numericValue >= 0.0 &&
+        numericValue <= 4294967295.0) {
+
+        *value = static_cast<uint32_t>(numericValue);
+        return true;
+    }
+
+    std::string text;
+    if (!ExtractJsonString(json, key, &text)) {
+        return false;
+    }
+
+    char* end = nullptr;
+    unsigned long parsed = std::strtoul(text.c_str(), &end, 0);
+    if (end == text.c_str() || *end != '\0' || parsed > 0xFFFFFFFFUL) {
+        return false;
+    }
+
+    *value = static_cast<uint32_t>(parsed);
+    return true;
+}
+
 bool LoadWrapperSettingsFromFile(const std::string& wrapperPath) {
     std::string json;
     if (!ReadWholeFile(wrapperPath, &json)) {
@@ -1534,19 +1600,15 @@ bool LoadWrapperSettingsFromFile(const std::string& wrapperPath) {
     double maxAimBias = gMOBASkillMaxAimXBiasPercent;
     double leftEdge = gMOBASkillLeftEdgeXPercent;
     double rightEdge = gMOBASkillRightEdgeXPercent;
-    double aimYScaleStart = gMOBASkillAimYBiasScaleStartPercent;
-    double aimYScaleEnd = gMOBASkillAimYBiasScaleEndPercent;
-    double aimYMinScale = gMOBASkillAimYBiasMinScale;
-    double dpadFullExtensionEnabled = gDpadFullExtensionEnabled ? 1.0 : 0.0;
-    double dpadDirectionSmoothingFactor = gDpadDirectionSmoothingFactor;
-    double dpadZeroHoldMs = gDpadZeroHoldMs;
-    double dpadKeyboardZeroHoldMs = gDpadKeyboardZeroHoldMs;
     double debugConsoleEnabled = gDebugConsoleEnabled ? 1.0 : 0.0;
     double customCursorEnabled = gCustomCursorEnabled ? 1.0 : 0.0;
+    double imageMarkerProbeEnabled = gImageMarkerProbeEnabled ? 1.0 : 0.0;
+    uint32_t imageMarkerProbeColor = gImageMarkerProbeColor;
     std::string customCursorMousePath = gCustomCursorMousePath;
     std::string customCursorMobaPath = gCustomCursorMobaPath;
     std::string customCursorMobaRightPath = gCustomCursorMobaRightPath;
     std::string customCursorBlankPath = gCustomCursorBlankPath;
+    std::string imageMarkerProbeLogPath = gImageMarkerProbeLogPath;
     bool foundAny = false;
 
     foundAny |= ExtractJsonNumber(json, "gDebugConsoleEnabled", &debugConsoleEnabled);
@@ -1554,20 +1616,14 @@ bool LoadWrapperSettingsFromFile(const std::string& wrapperPath) {
     foundAny |= ExtractJsonNumber(json, "gMOBASkillMaxAimXBiasPercent", &maxAimBias);
     foundAny |= ExtractJsonNumber(json, "gMOBASkillLeftEdgeXPercent", &leftEdge);
     foundAny |= ExtractJsonNumber(json, "gMOBASkillRightEdgeXPercent", &rightEdge);
-    foundAny |= ExtractJsonNumber(json, "gMOBASkillAimYBiasScaleStartPercent", &aimYScaleStart);
-    foundAny |= ExtractJsonNumber(json, "gMOBASkillAimYBiasScaleEndPercent", &aimYScaleEnd);
-    bool foundAimYMinScale = ExtractJsonNumber(json, "gMOBASkillAimYBiasMinScale", &aimYMinScale);
-    foundAny |= foundAimYMinScale;
-    foundAny |= ExtractJsonNumber(json, "gDpadFullExtensionEnabled", &dpadFullExtensionEnabled);
-    bool foundDpadDirectionSmoothingFactor = ExtractJsonNumber(json, "gDpadDirectionSmoothingFactor", &dpadDirectionSmoothingFactor);
-    foundAny |= foundDpadDirectionSmoothingFactor;
-    foundAny |= ExtractJsonNumber(json, "gDpadZeroHoldMs", &dpadZeroHoldMs);
-    foundAny |= ExtractJsonNumber(json, "gDpadKeyboardZeroHoldMs", &dpadKeyboardZeroHoldMs);
     foundAny |= ExtractJsonNumber(json, "gCustomCursorEnabled", &customCursorEnabled);
+    foundAny |= ExtractJsonNumber(json, "gImageMarkerProbeEnabled", &imageMarkerProbeEnabled);
+    foundAny |= ExtractJsonUInt32(json, "gImageMarkerProbeColor", &imageMarkerProbeColor);
     foundAny |= ExtractJsonString(json, "gCustomCursorMousePath", &customCursorMousePath);
     foundAny |= ExtractJsonString(json, "gCustomCursorMobaPath", &customCursorMobaPath);
     foundAny |= ExtractJsonString(json, "gCustomCursorMobaRightPath", &customCursorMobaRightPath);
     foundAny |= ExtractJsonString(json, "gCustomCursorBlankPath", &customCursorBlankPath);
+    foundAny |= ExtractJsonString(json, "gImageMarkerProbeLogPath", &imageMarkerProbeLogPath);
 
     if (!foundAny) {
         DebugPrint("Wrapper settings: no known settings found in %s, using defaults\n", wrapperPath.c_str());
@@ -1578,60 +1634,46 @@ bool LoadWrapperSettingsFromFile(const std::string& wrapperPath) {
     gMOBASkillMaxAimXBiasPercent = ClampDouble(maxAimBias, 0.0, 30.0);
     gMOBASkillLeftEdgeXPercent = ClampDouble(leftEdge, 0.0, 99.0);
     gMOBASkillRightEdgeXPercent = ClampDouble(rightEdge, gMOBASkillLeftEdgeXPercent + 1.0, 100.0);
-    gMOBASkillAimYBiasScaleStartPercent = ClampDouble(aimYScaleStart, 0.0, 100.0);
-    gMOBASkillAimYBiasScaleEndPercent = ClampDouble(
-        aimYScaleEnd,
-        gMOBASkillAimYBiasScaleStartPercent + 1.0,
-        100.0);
-    gMOBASkillAimYBiasMinScale = ClampDouble(aimYMinScale, -1.0, 1.0);
-    if (foundAimYMinScale && gMOBASkillAimYBiasMinScale >= 0.0) {
-        DebugPrint(
-            "Wrapper settings: migrating legacy non-reversing gMOBASkillAimYBiasMinScale %.2f to -1.00\n",
-            gMOBASkillAimYBiasMinScale);
-        gMOBASkillAimYBiasMinScale = -1.0;
-    }
-    gDpadFullExtensionEnabled = dpadFullExtensionEnabled != 0.0;
-    if (foundDpadDirectionSmoothingFactor &&
-        (dpadDirectionSmoothingFactor < 0.0 || dpadDirectionSmoothingFactor > 1.0)) {
-        DebugPrint(
-            "Wrapper settings: migrating out-of-range gDpadDirectionSmoothingFactor %.2f to 0.45\n",
-            dpadDirectionSmoothingFactor);
-        dpadDirectionSmoothingFactor = 0.45;
-    }
-    gDpadDirectionSmoothingFactor = ClampDouble(dpadDirectionSmoothingFactor, 0.0, 1.0);
-    gDpadZeroHoldMs = ClampDouble(dpadZeroHoldMs, 0.0, 250.0);
-    gDpadKeyboardZeroHoldMs = ClampDouble(dpadKeyboardZeroHoldMs, 0.0, 250.0);
     gDebugConsoleEnabled = debugConsoleEnabled != 0.0;
     gCustomCursorEnabled = customCursorEnabled != 0.0;
+    bool previousImageMarkerProbeEnabled = gImageMarkerProbeEnabled;
+    uint32_t previousImageMarkerProbeColor = gImageMarkerProbeColor;
+    gImageMarkerProbeEnabled = imageMarkerProbeEnabled != 0.0;
+    gImageMarkerProbeColor = imageMarkerProbeColor;
     gCustomCursorMousePath = customCursorMousePath;
     gCustomCursorMobaPath = customCursorMobaPath;
     gCustomCursorMobaRightPath = customCursorMobaRightPath;
     gCustomCursorBlankPath = customCursorBlankPath;
+    gImageMarkerProbeLogPath = imageMarkerProbeLogPath;
+    if (gImageMarkerProbeEnabled != previousImageMarkerProbeEnabled ||
+        gImageMarkerProbeColor != previousImageMarkerProbeColor) {
+
+        InterlockedExchange(&gImageMarkerProbeCallLogCount, 0);
+        InterlockedExchange(&gImageMarkerProbeMatchLogCount, 0);
+        gImageMarkerProbeLastCallLogTick = 0;
+    }
     UpdateDebugConsoleVisibility();
     ReloadCustomCursors();
-    if (!gDpadFullExtensionEnabled) {
-        ResetDpadSmoothingState();
-    }
 
     DebugPrint(
-        "Wrapper settings loaded: debugConsole=%d MOBASkill strength=%.2f edgeWidth=%.2f anchors=(%.2f, %.2f) downwardAimYScale=(%.2f..%.2f min %.2f) dpadFullExtension=%d dpadSmoothing=%.2f dpadZeroHoldMs=%.0f dpadKeyboardZeroHoldMs=%.0f customCursor=%d mouse=%s moba=%s mobaRight=%s blank=%s\n",
+        "Wrapper settings loaded: debugConsole=%d MOBASkill strength=%.2f edgeWidth=%.2f anchors=(%.2f, %.2f) customCursor=%d mouse=%s moba=%s mobaRight=%s blank=%s\n",
         static_cast<int>(gDebugConsoleEnabled),
         gMOBASkillMaxAimXBiasPercent,
         gMOBASkillEdgeThresholdPercent,
         gMOBASkillLeftEdgeXPercent,
         gMOBASkillRightEdgeXPercent,
-        gMOBASkillAimYBiasScaleStartPercent,
-        gMOBASkillAimYBiasScaleEndPercent,
-        gMOBASkillAimYBiasMinScale,
-        static_cast<int>(gDpadFullExtensionEnabled),
-        gDpadDirectionSmoothingFactor,
-        gDpadZeroHoldMs,
-        gDpadKeyboardZeroHoldMs,
         static_cast<int>(gCustomCursorEnabled),
         gCustomCursorMousePath.c_str(),
         gCustomCursorMobaPath.c_str(),
         gCustomCursorMobaRightPath.c_str(),
         gCustomCursorBlankPath.c_str());
+    if (gImageMarkerProbeEnabled) {
+        DebugPrint(
+            "Image marker probe enabled: color=0x%08X log=%s\n",
+            gImageMarkerProbeColor,
+            GetImageMarkerProbeLogPath().c_str());
+        AppendImageMarkerProbeLogLine("=== image marker probe settings loaded ===\n");
+    }
     return true;
 }
 
@@ -1828,14 +1870,10 @@ void LogHookError(const char* step, MH_STATUS status) {
 DWORD WINAPI MainThread(LPVOID lpReserved) {
     LoadWrapperSettings(GetBrawlStarsLiveCfgPath());
     DebugPrint("Config: save from cfg editor to reload Brawl Stars cfg from BlueStacks user file\n");
-    DebugPrint("Initial debugConsole %d, MOBASkill compensation strength %.2f, edge threshold %.2f, Dpad full-extension %d smoothing %.2f analogZeroHoldMs %.0f keyboardZeroHoldMs %.0f\n",
+    DebugPrint("Initial debugConsole %d, MOBASkill compensation strength %.2f, edge threshold %.2f\n",
         static_cast<int>(gDebugConsoleEnabled),
         gMOBASkillMaxAimXBiasPercent,
-        gMOBASkillEdgeThresholdPercent,
-        static_cast<int>(gDpadFullExtensionEnabled),
-        gDpadDirectionSmoothingFactor,
-        gDpadZeroHoldMs,
-        gDpadKeyboardZeroHoldMs);
+        gMOBASkillEdgeThresholdPercent);
 
     // Signature for BlueStacks Matcher Prologue
     std::vector<int> sig = { 0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x6c, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xec, 0x20, 0x80, 0x79, 0x2a, 0x00 };
@@ -1941,74 +1979,6 @@ DWORD WINAPI MainThread(LPVOID lpReserved) {
             }
         } else {
             ReportHookResolutionError("ImapRtMOBASkill_computeAimCoords", "Fallback RVA is outside the HD-Player image.");
-        }
-
-        if (IsRvaInsideModule(hMod, kDpadHandleGamepadAnalogMoveRva)) {
-            std::vector<int> dpadAnalogSig = {
-                0x48, 0x8b, 0xc4, 0x53, 0x55, 0x56, 0x57, 0x48, 0x83, 0xec, 0x78
-            };
-            uintptr_t dpadAnalogFunc = ResolveFunction(hMod, dpadAnalogSig, kDpadHandleGamepadAnalogMoveRva);
-            if (!dpadAnalogFunc) {
-                ReportHookResolutionError("ImapRtDpad_handleGamepadAnalogMove", "Signature and fallback RVA resolution both failed.");
-            } else {
-                status = MH_CreateHook(
-                    reinterpret_cast<void*>(dpadAnalogFunc),
-                    &CustomDpadHandleGamepadAnalogMove,
-                    reinterpret_cast<void**>(&pOriginalDpadHandleGamepadAnalogMove));
-                if (status != MH_OK) {
-                    LogHookError("MH_CreateHook CustomDpadHandleGamepadAnalogMove", status);
-                } else {
-                    DebugPrint(
-                        "Dpad analog full-extension hook created at 0x%p enabled=%d smoothing=%.2f zeroHoldMs=%.0f\n",
-                        reinterpret_cast<void*>(dpadAnalogFunc),
-                        static_cast<int>(gDpadFullExtensionEnabled),
-                        gDpadDirectionSmoothingFactor,
-                        gDpadZeroHoldMs);
-                }
-            }
-        } else {
-            ReportHookResolutionError("ImapRtDpad_handleGamepadAnalogMove", "Fallback RVA is outside the HD-Player image.");
-        }
-
-        if (IsRvaInsideModule(hMod, kDpadUpdateVirtualJoystickTouchRva)) {
-            std::vector<int> dpadUpdateSig = {
-                0x48, 0x89, 0x5c, 0x24, -1, 0x48, 0x89, 0x74, 0x24, -1, 0x57, 0x48, 0x83, 0xec, 0x20, 0x8b, 0x81
-            };
-            pDpadUpdateVirtualJoystickTouch = reinterpret_cast<DpadUpdateVirtualJoystickTouchFn>(
-                ResolveFunction(hMod, dpadUpdateSig, kDpadUpdateVirtualJoystickTouchRva));
-            if (!pDpadUpdateVirtualJoystickTouch) {
-                ReportHookResolutionError("ImapRtDpad_updateVirtualJoystickTouch", "Signature and fallback RVA resolution both failed.");
-            } else {
-                DebugPrint("Dpad virtual joystick update function resolved at 0x%p\n", reinterpret_cast<void*>(pDpadUpdateVirtualJoystickTouch));
-            }
-        } else {
-            ReportHookResolutionError("ImapRtDpad_updateVirtualJoystickTouch", "Fallback RVA is outside the HD-Player image.");
-        }
-
-        if (IsRvaInsideModule(hMod, kDpadHandleKeyEventRva)) {
-            std::vector<int> dpadKeySig = {
-                0x48, 0x8b, 0xc4, 0x48, 0x89, 0x58, -1, 0x44, 0x89, 0x40
-            };
-            uintptr_t dpadKeyFunc = ResolveFunction(hMod, dpadKeySig, kDpadHandleKeyEventRva);
-            if (!dpadKeyFunc) {
-                ReportHookResolutionError("ImapRtDpad_handleKeyEvent", "Signature and fallback RVA resolution both failed.");
-            } else {
-            status = MH_CreateHook(
-                reinterpret_cast<void*>(dpadKeyFunc),
-                &CustomDpadHandleKeyEvent,
-                reinterpret_cast<void**>(&pOriginalDpadHandleKeyEvent));
-            if (status != MH_OK) {
-                LogHookError("MH_CreateHook CustomDpadHandleKeyEvent", status);
-            } else {
-                DebugPrint(
-                    "Dpad keyboard zero-bridge hook created at 0x%p enabled=%d zeroHoldMs=%.0f\n",
-                    reinterpret_cast<void*>(dpadKeyFunc),
-                    static_cast<int>(gDpadFullExtensionEnabled),
-                    gDpadKeyboardZeroHoldMs);
-            }
-            }
-        } else {
-            ReportHookResolutionError("ImapRtDpad_handleKeyEvent", "Fallback RVA is outside the HD-Player image.");
         }
 
         status = MH_EnableHook(MH_ALL_HOOKS);
