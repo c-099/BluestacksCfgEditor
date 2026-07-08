@@ -2,6 +2,7 @@ using System.Diagnostics;
 using System.Globalization;
 using System.Text;
 using System.Text.Json.Nodes;
+using System.Text.RegularExpressions;
 
 namespace BluestacksCfgEditor;
 
@@ -352,7 +353,7 @@ internal sealed class TextureCrcUpdateForm : Form
         _candidates = DiscoverTextureCandidates(textureDumpDir, textureSize);
         foreach (TextureCandidate candidate in _candidates)
         {
-            _candidateListBox.Items.Add($"{candidate.Crc}  {candidate.FileName}");
+            _candidateListBox.Items.Add($"{candidate.Crc}  {candidate.SourceLabel}  {candidate.FileName}");
         }
 
         string targetImageId = GetTargetImageId(textureSize);
@@ -444,10 +445,10 @@ internal sealed class TextureCrcUpdateForm : Form
             for (int i = 0; i < _candidates.Count; i++)
             {
                 TextureCandidate candidate = _candidates[i];
-                _statusLabel.Text = $"Testing {i + 1} of {_candidates.Count}: {candidate.Crc}";
+                _statusLabel.Text = $"Testing {i + 1} of {_candidates.Count}: {candidate.Crc} ({candidate.SourceLabel})";
                 await File.AppendAllTextAsync(
                     probeLogPath,
-                    $"=== candidate {candidate.Crc} {textureSize}x{textureSize} {candidate.FileName} ==={Environment.NewLine}");
+                    $"=== candidate {candidate.Crc} {candidate.SourceLabel} {textureSize}x{textureSize} {candidate.FileName} ==={Environment.NewLine}");
 
                 SetCustomSchemeImageTextureCrc(configPath, candidate.Crc, targetImageId);
                 TouchReloadMarker(configPath);
@@ -465,12 +466,21 @@ internal sealed class TextureCrcUpdateForm : Form
 
                 if (matchLine is not null)
                 {
+                    TextureCoordinate? runtimeCoordinate = TryParseRuntimeUv(matchLine);
+                    if (runtimeCoordinate is not null)
+                    {
+                        SetCustomSchemeImageTextureCrc(configPath, candidate.Crc, targetImageId, runtimeCoordinate);
+                    }
+
                     RestoreWrapperProbeSettings(wrapperConfigPath, wrapperBackupText);
                     TouchReloadMarker(configPath);
                     _statusLabel.Text = $"Match found: {candidate.Crc}";
+                    string coordinateText = runtimeCoordinate is null
+                        ? "TextureCoord: not logged by wrapper"
+                        : $"TextureCoord: [{runtimeCoordinate.U.ToString("0.##########", CultureInfo.InvariantCulture)}, {runtimeCoordinate.V.ToString("0.##########", CultureInfo.InvariantCulture)}]";
                     MessageBox.Show(
                         this,
-                        $"MATCH found.\n\nImageId: {targetImageId}\nTextureCRC: {candidate.Crc}\nTexture: {candidate.FileName}\n\nThe live config was left on the matching candidate.\nBackup: {configBackupPath}",
+                        $"MATCH found.\n\nImageId: {targetImageId}\nTextureCRC: {candidate.Crc}\nCRC source: {candidate.SourceLabel}\n{coordinateText}\nTexture: {candidate.FileName}\n\nThe live config was left on the matching candidate.\nBackup: {configBackupPath}",
                         "TextureCRC Update",
                         MessageBoxButtons.OK,
                         MessageBoxIcon.Information);
@@ -634,22 +644,52 @@ internal sealed class TextureCrcUpdateForm : Form
 
     private static List<TextureCandidate> DiscoverTextureCandidates(string textureDumpDir, int textureSize)
     {
-        string suffix = $"_{textureSize}X{textureSize}.png";
+        Regex fileNamePattern = new(
+            $@"^CRC_(0x[0-9A-Fa-f]+)(?:_(0x[0-9A-Fa-f]+))?_{textureSize}X{textureSize}\.png$",
+            RegexOptions.CultureInvariant | RegexOptions.IgnoreCase);
+
         return Directory.EnumerateFiles(textureDumpDir, "CRC_0x*.png", SearchOption.TopDirectoryOnly)
             .Select(path => new FileInfo(path))
-            .Where(file => file.Name.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
-            .Select(file =>
+            .SelectMany(file =>
             {
-                string crc = file.Name.Split('_', StringSplitOptions.RemoveEmptyEntries).ElementAtOrDefault(1) ?? string.Empty;
-                return new TextureCandidate(
-                    NormalizeCrc(crc),
-                    file.Name,
-                    file.Length);
+                Match match = fileNamePattern.Match(file.Name);
+                if (!match.Success)
+                {
+                    return Enumerable.Empty<TextureCandidate>();
+                }
+
+                List<TextureCandidate> candidates = [];
+                AddTextureCandidate(candidates, match.Groups[1].Value, "CRC #1", file);
+                if (match.Groups[2].Success)
+                {
+                    AddTextureCandidate(candidates, match.Groups[2].Value, "CRC #2", file);
+                }
+
+                return candidates
+                    .GroupBy(candidate => candidate.Crc, StringComparer.OrdinalIgnoreCase)
+                    .Select(group => group.First());
             })
             .Where(candidate => candidate.Crc.Length > 2)
             .OrderByDescending(candidate => candidate.Length)
+            .ThenBy(candidate => candidate.FileName, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(candidate => candidate.SourceLabel, StringComparer.Ordinal)
             .ThenBy(candidate => candidate.Crc, StringComparer.Ordinal)
             .ToList();
+    }
+
+    private static void AddTextureCandidate(List<TextureCandidate> candidates, string rawCrc, string sourceLabel, FileInfo file)
+    {
+        string crc = NormalizeCrc(rawCrc);
+        if (crc.Length <= 2)
+        {
+            return;
+        }
+
+        candidates.Add(new TextureCandidate(
+            crc,
+            sourceLabel,
+            file.Name,
+            file.Length));
     }
 
     private static string NormalizeCrc(string crc)
@@ -777,7 +817,36 @@ internal sealed class TextureCrcUpdateForm : Form
         ConfigService.SaveWrapperSettings(wrapper, wrapperConfigPath);
     }
 
-    private static void SetCustomSchemeImageTextureCrc(string configPath, string textureCrc, string imageId)
+    private static TextureCoordinate? TryParseRuntimeUv(string matchLine)
+    {
+        Match match = Regex.Match(
+            matchLine,
+            @"\bbestUv=\((?<u>-?\d+(?:\.\d+)?),\s*(?<v>-?\d+(?:\.\d+)?)\)",
+            RegexOptions.CultureInvariant);
+        if (!match.Success)
+        {
+            return null;
+        }
+
+        if (!double.TryParse(match.Groups["u"].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out double u) ||
+            !double.TryParse(match.Groups["v"].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out double v))
+        {
+            return null;
+        }
+
+        if (!double.IsFinite(u) || !double.IsFinite(v) || u < 0 || u > 1 || v < 0 || v > 1)
+        {
+            return null;
+        }
+
+        return new TextureCoordinate(u, v);
+    }
+
+    private static void SetCustomSchemeImageTextureCrc(
+        string configPath,
+        string textureCrc,
+        string imageId,
+        TextureCoordinate? textureCoordinate = null)
     {
         JsonObject document = ConfigService.LoadConfig(configPath);
         int changed = 0;
@@ -793,20 +862,30 @@ internal sealed class TextureCrcUpdateForm : Form
 
                 string feet2Crc = GetExistingImageTextureCrc(scheme, "Feet2") ?? "0x7D021CAA";
                 string feetCrc = GetExistingImageTextureCrc(scheme, "Feet") ?? "0xF5BBA9CA";
+                TextureCoordinate feet2Coord = GetExistingImageTextureCoord(scheme, "Feet2") ?? DefaultBrawlStarsTextureCoordinate();
+                TextureCoordinate feetCoord = GetExistingImageTextureCoord(scheme, "Feet") ?? DefaultBrawlStarsTextureCoordinate();
                 if (string.Equals(imageId, "Feet2", StringComparison.Ordinal))
                 {
                     feet2Crc = textureCrc;
+                    if (textureCoordinate is not null)
+                    {
+                        feet2Coord = textureCoordinate;
+                    }
                 }
                 else if (string.Equals(imageId, "Feet", StringComparison.Ordinal))
                 {
                     feetCrc = textureCrc;
+                    if (textureCoordinate is not null)
+                    {
+                        feetCoord = textureCoordinate;
+                    }
                 }
                 else
                 {
                     throw new InvalidDataException($"Unsupported TextureCRC image id: {imageId}");
                 }
 
-                scheme["Images"] = CreateBrawlStarsImagesArray(feet2Crc, feetCrc);
+                scheme["Images"] = CreateBrawlStarsImagesArray(feet2Crc, feetCrc, feet2Coord, feetCoord);
                 changed++;
             }
         }
@@ -845,13 +924,48 @@ internal sealed class TextureCrcUpdateForm : Form
         return null;
     }
 
-    private static JsonArray CreateBrawlStarsImagesArray(string feet2Crc, string feetCrc) =>
+    private static TextureCoordinate? GetExistingImageTextureCoord(JsonObject scheme, string imageId)
+    {
+        if (scheme["Images"] is not JsonArray images)
+        {
+            return null;
+        }
+
+        foreach (JsonNode? imageNode in images)
+        {
+            if (imageNode is not JsonObject image ||
+                !string.Equals(image["ImageId"]?.GetValue<string?>(), imageId, StringComparison.Ordinal) ||
+                image["TextureCoord"] is not JsonArray coord ||
+                coord.Count < 2)
+            {
+                continue;
+            }
+
+            double? u = coord[0]?.GetValue<double?>();
+            double? v = coord[1]?.GetValue<double?>();
+            if (u is not null && v is not null)
+            {
+                return new TextureCoordinate(u.Value, v.Value);
+            }
+        }
+
+        return null;
+    }
+
+    private static TextureCoordinate DefaultBrawlStarsTextureCoordinate() =>
+        new(0.6453857422, 0.5466308594);
+
+    private static JsonArray CreateBrawlStarsImagesArray(
+        string feet2Crc,
+        string feetCrc,
+        TextureCoordinate feet2Coord,
+        TextureCoordinate feetCoord) =>
     [
-        CreateBrawlStarsImage("Feet2", feet2Crc),
-        CreateBrawlStarsImage("Feet", feetCrc),
+        CreateBrawlStarsImage("Feet2", feet2Crc, feet2Coord),
+        CreateBrawlStarsImage("Feet", feetCrc, feetCoord),
     ];
 
-    private static JsonObject CreateBrawlStarsImage(string imageId, string textureCrc) =>
+    private static JsonObject CreateBrawlStarsImage(string imageId, string textureCrc, TextureCoordinate textureCoordinate) =>
         new()
         {
             ["ImageId"] = imageId,
@@ -864,8 +978,8 @@ internal sealed class TextureCrcUpdateForm : Form
             ["TextureCoord"] =
                 new JsonArray
                 {
-                    0.6453857422,
-                    0.5466308594,
+                    textureCoordinate.U,
+                    textureCoordinate.V,
                 },
             ["VertexRect"] = new JsonArray(),
         };
@@ -909,5 +1023,7 @@ internal sealed class TextureCrcUpdateForm : Form
         }
     }
 
-    private sealed record TextureCandidate(string Crc, string FileName, long Length);
+    private sealed record TextureCandidate(string Crc, string SourceLabel, string FileName, long Length);
+
+    private sealed record TextureCoordinate(double U, double V);
 }

@@ -55,10 +55,14 @@ $ResolvedVersion = Get-ProjectVersion
 $PackageName = "BluestacksCfgEditor-v$ResolvedVersion-$Runtime"
 $StageDir = Join-Path $StageRoot $PackageName
 $PublishDir = Join-Path $StageDir "app"
+$BuildOutputDir = Join-Path $StageRoot "build\$PackageName\bin\"
 $ZipPath = Join-Path $ArtifactsRoot "$PackageName.zip"
 
 if (Test-Path -LiteralPath $StageDir) {
     Remove-Item -LiteralPath $StageDir -Recurse -Force
+}
+if (Test-Path -LiteralPath $BuildOutputDir) {
+    Remove-Item -LiteralPath $BuildOutputDir -Recurse -Force
 }
 New-Item -ItemType Directory -Force -Path $PublishDir | Out-Null
 New-Item -ItemType Directory -Force -Path $ArtifactsRoot | Out-Null
@@ -67,6 +71,9 @@ $MSBuild = Resolve-MSBuild
 
 Write-Host "Building wrapper..."
 & $MSBuild $WrapperProject /p:Configuration=$Configuration /p:Platform=x64 /m
+if ($LASTEXITCODE -ne 0) {
+    throw "Wrapper build failed with exit code $LASTEXITCODE."
+}
 
 Write-Host "Publishing editor..."
 dotnet publish $EditorProject `
@@ -74,7 +81,11 @@ dotnet publish $EditorProject `
     -r $Runtime `
     --self-contained true `
     -o $PublishDir `
-    /p:PublishSingleFile=true
+    /p:PublishSingleFile=true `
+    /p:OutputPath="$BuildOutputDir"
+if ($LASTEXITCODE -ne 0) {
+    throw "Editor publish failed with exit code $LASTEXITCODE."
+}
 
 Get-ChildItem -LiteralPath $PublishDir -Filter "*.pdb" -File -ErrorAction SilentlyContinue |
     Remove-Item -Force

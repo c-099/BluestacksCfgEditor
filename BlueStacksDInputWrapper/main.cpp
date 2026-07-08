@@ -1,3 +1,6 @@
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
 #include <windows.h>
 #include <cstdint>
 #include <vector>
@@ -7,6 +10,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdarg>
+#include <cmath>
 #include <cstdlib>
 #include <cstring>
 #include <fstream>
@@ -51,7 +55,7 @@ struct IndexStruct {
 
 struct ImgdState {
     IndexStruct* idxStruct; // +0x00
-    uint8_t* colorBuf;      // +0x08
+    uint8_t* colorBuf;      // +0x08; generic attribute buffer in sibling states
     uint8_t pad1[12];
     int stride;             // +0x1C
     int compCount;          // +0x20
@@ -826,6 +830,260 @@ void LogImageMarkerProbeCall(
     AppendImageMarkerProbeLogLine(line);
 }
 
+bool IsReadableRange(const void* address, size_t length) {
+    if (!address || length == 0) return false;
+
+    uintptr_t current = reinterpret_cast<uintptr_t>(address);
+    uintptr_t end = current + length;
+    if (end < current) return false;
+
+    while (current < end) {
+        MEMORY_BASIC_INFORMATION mbi = {};
+        if (VirtualQuery(reinterpret_cast<const void*>(current), &mbi, sizeof(mbi)) != sizeof(mbi)) {
+            return false;
+        }
+
+        if (mbi.State != MEM_COMMIT ||
+            (mbi.Protect & (PAGE_NOACCESS | PAGE_GUARD)) != 0) {
+            return false;
+        }
+
+        uintptr_t regionEnd = reinterpret_cast<uintptr_t>(mbi.BaseAddress) + mbi.RegionSize;
+        if (regionEnd <= current) return false;
+        current = regionEnd;
+    }
+
+    return true;
+}
+
+bool SafeCopyMemory(const void* source, void* destination, size_t length) {
+    if (!destination || !IsReadableRange(source, length)) return false;
+
+    __try {
+        memcpy(destination, source, length);
+        return true;
+    } __except (EXCEPTION_EXECUTE_HANDLER) {
+        return false;
+    }
+}
+
+template <typename T>
+bool SafeReadValue(const void* source, T* value) {
+    return SafeCopyMemory(source, value, sizeof(T));
+}
+
+bool IsSupportedAttributeType(int type) {
+    return type == 0x1406 || // GL_FLOAT
+           type == 0x1401 || // GL_UNSIGNED_BYTE
+           type == 0x1402 || // GL_SHORT
+           type == 0x1403 || // GL_UNSIGNED_SHORT
+           type == 0x1404 || // GL_INT
+           type == 0x1405;   // GL_UNSIGNED_INT
+}
+
+bool IsReasonableAttributeState(const ImgdState& attr, uint32_t maxVertex) {
+    if (!attr.colorBuf) return false;
+    if (attr.maxVerts <= 0 || static_cast<uint32_t>(attr.maxVerts) <= maxVertex) return false;
+    if (attr.maxVerts > 1000000) return false;
+    if (attr.stride <= 0 || attr.stride > 256) return false;
+    if (attr.compCount < 2 || attr.compCount > 4) return false;
+    if (!IsSupportedAttributeType(attr.type)) return false;
+    return true;
+}
+
+bool DecodeAttributeVec2(const ImgdState& attr, uint32_t vertex, double* outU, double* outV) {
+    if (!outU || !outV || !IsReasonableAttributeState(attr, vertex)) return false;
+
+    const uint8_t* element = attr.colorBuf + (static_cast<size_t>(vertex) * static_cast<size_t>(attr.stride));
+    if (!IsReadableRange(element, static_cast<size_t>(attr.stride))) return false;
+
+    if (attr.type == 0x1406) {
+        float values[2] = {};
+        if (!SafeCopyMemory(element, values, sizeof(values))) return false;
+        if (!std::isfinite(values[0]) || !std::isfinite(values[1])) return false;
+        *outU = values[0];
+        *outV = values[1];
+        return true;
+    }
+
+    if (attr.type == 0x1403) {
+        uint16_t values[2] = {};
+        if (!SafeCopyMemory(element, values, sizeof(values))) return false;
+        *outU = static_cast<double>(values[0]) / 65535.0;
+        *outV = static_cast<double>(values[1]) / 65535.0;
+        return true;
+    }
+
+    if (attr.type == 0x1402) {
+        int16_t values[2] = {};
+        if (!SafeCopyMemory(element, values, sizeof(values))) return false;
+        *outU = std::max(-1.0, static_cast<double>(values[0]) / 32767.0);
+        *outV = std::max(-1.0, static_cast<double>(values[1]) / 32767.0);
+        return true;
+    }
+
+    if (attr.type == 0x1401) {
+        uint8_t values[2] = {};
+        if (!SafeCopyMemory(element, values, sizeof(values))) return false;
+        *outU = static_cast<double>(values[0]) / 255.0;
+        *outV = static_cast<double>(values[1]) / 255.0;
+        return true;
+    }
+
+    if (attr.type == 0x1405) {
+        uint32_t values[2] = {};
+        if (!SafeCopyMemory(element, values, sizeof(values))) return false;
+        *outU = static_cast<double>(values[0]) / 4294967295.0;
+        *outV = static_cast<double>(values[1]) / 4294967295.0;
+        return true;
+    }
+
+    if (attr.type == 0x1404) {
+        int32_t values[2] = {};
+        if (!SafeCopyMemory(element, values, sizeof(values))) return false;
+        *outU = std::max(-1.0, static_cast<double>(values[0]) / 2147483647.0);
+        *outV = std::max(-1.0, static_cast<double>(values[1]) / 2147483647.0);
+        return true;
+    }
+
+    return false;
+}
+
+bool LooksLikeUvTriangle(double u0, double v0, double u1, double v1, double u2, double v2) {
+    double values[] = { u0, v0, u1, v1, u2, v2 };
+    for (double value : values) {
+        if (!std::isfinite(value) || value < -0.001 || value > 1.001) {
+            return false;
+        }
+    }
+
+    double spanU = std::max({ u0, u1, u2 }) - std::min({ u0, u1, u2 });
+    double spanV = std::max({ v0, v1, v2 }) - std::min({ v0, v1, v2 });
+    if (spanU < 0.000001 && spanV < 0.000001) return false;
+    return spanU <= 0.25 && spanV <= 0.25;
+}
+
+struct UvProbeCandidate {
+    int offset;
+    ImgdState attr;
+    double u0;
+    double v0;
+    double u1;
+    double v1;
+    double u2;
+    double v2;
+    double score;
+};
+
+bool TryFindRuntimeUv(
+    ImgdState* colorState,
+    uint32_t v0,
+    uint32_t v1,
+    uint32_t v2,
+    char* bestText,
+    size_t bestTextSize,
+    char* candidatesText,
+    size_t candidatesTextSize) {
+
+    if (bestText && bestTextSize > 0) bestText[0] = '\0';
+    if (candidatesText && candidatesTextSize > 0) candidatesText[0] = '\0';
+    if (!colorState) return false;
+
+    uint32_t maxVertex = std::max({ v0, v1, v2 });
+    uintptr_t stateAddress = reinterpret_cast<uintptr_t>(colorState);
+    std::vector<UvProbeCandidate> candidates;
+
+    for (int offset = -0x1400; offset <= 0x1400; offset += 0x10) {
+        ImgdState attr = {};
+        const void* attrAddress = reinterpret_cast<const void*>(stateAddress + offset);
+        if (!SafeReadValue(attrAddress, &attr)) {
+            continue;
+        }
+
+        if (!IsReasonableAttributeState(attr, maxVertex)) {
+            continue;
+        }
+
+        if (offset == 0 || attr.colorBuf == colorState->colorBuf) {
+            continue;
+        }
+
+        double u0 = 0.0, vv0 = 0.0, u1 = 0.0, vv1 = 0.0, u2 = 0.0, vv2 = 0.0;
+        if (!DecodeAttributeVec2(attr, v0, &u0, &vv0) ||
+            !DecodeAttributeVec2(attr, v1, &u1, &vv1) ||
+            !DecodeAttributeVec2(attr, v2, &u2, &vv2)) {
+            continue;
+        }
+
+        if (!LooksLikeUvTriangle(u0, vv0, u1, vv1, u2, vv2)) {
+            continue;
+        }
+
+        double spanU = std::max({ u0, u1, u2 }) - std::min({ u0, u1, u2 });
+        double spanV = std::max({ vv0, vv1, vv2 }) - std::min({ vv0, vv1, vv2 });
+        double score = (attr.type == 0x1406 ? 0.0 : 8.0) +
+                       (attr.compCount == 2 ? 0.0 : 1.0) +
+                       ((spanU + spanV) * 20.0) +
+                       (std::abs(offset) * 0.0001);
+        candidates.push_back({ offset, attr, u0, vv0, u1, vv1, u2, vv2, score });
+    }
+
+    if (candidates.empty()) {
+        return false;
+    }
+
+    std::sort(candidates.begin(), candidates.end(), [](const UvProbeCandidate& a, const UvProbeCandidate& b) {
+        return a.score < b.score;
+    });
+
+    const UvProbeCandidate& best = candidates.front();
+    if (bestText && bestTextSize > 0) {
+        sprintf_s(
+            bestText,
+            bestTextSize,
+            " bestUv=(%.10f,%.10f) uvSource=state%+d stride=%d comp=%d type=0x%X uvTri=((%.10f,%.10f),(%.10f,%.10f),(%.10f,%.10f))",
+            best.u0,
+            best.v0,
+            best.offset,
+            best.attr.stride,
+            best.attr.compCount,
+            best.attr.type,
+            best.u0,
+            best.v0,
+            best.u1,
+            best.v1,
+            best.u2,
+            best.v2);
+    }
+
+    if (candidatesText && candidatesTextSize > 0) {
+        candidatesText[0] = '\0';
+        size_t limit = std::min<size_t>(candidates.size(), 6);
+        for (size_t i = 0; i < limit; ++i) {
+            const UvProbeCandidate& item = candidates[i];
+            char part[384] = {};
+            sprintf_s(
+                part,
+                " uvCandidate%zu=state%+d/type=0x%X/comp=%d/stride=%d/uv0=(%.6f,%.6f)/uv1=(%.6f,%.6f)/uv2=(%.6f,%.6f)/score=%.3f",
+                i + 1,
+                item.offset,
+                item.attr.type,
+                item.attr.compCount,
+                item.attr.stride,
+                item.u0,
+                item.v0,
+                item.u1,
+                item.v1,
+                item.u2,
+                item.v2,
+                item.score);
+            strcat_s(candidatesText, candidatesTextSize, part);
+        }
+    }
+
+    return true;
+}
+
 template<typename T>
 int FindFirstIndexPosition(const T* data, uint32_t maxEntries, uint32_t vertex) {
     if (!data) return -1;
@@ -943,10 +1201,14 @@ void LogImageMarkerProbeMatch(
     }
 
     DWORD now = GetTickCount();
-    char line[1024] = {};
+    char uvBest[512] = {};
+    char uvCandidates[2304] = {};
+    TryFindRuntimeUv(state, v0, v1, v2, uvBest, sizeof(uvBest), uvCandidates, sizeof(uvCandidates));
+
+    char line[4096] = {};
     sprintf_s(
         line,
-        "MATCH tick=%lu count=%ld caller=%p state=%p mode=%d p4=%d mc=0x%08X stream=(%u,%u,%u) vertices=(%u,%u,%u) color=(%02X,%02X,%02X,%02X) cursorBefore=%u maxVerts=%d stride=%d comp=%d type=0x%X flag=0x%02X idxStruct=%p idxData=%p idxType=0x%X colorBuf=%p\n",
+        "MATCH tick=%lu count=%ld caller=%p state=%p mode=%d p4=%d mc=0x%08X stream=(%u,%u,%u) vertices=(%u,%u,%u) color=(%02X,%02X,%02X,%02X) cursorBefore=%u maxVerts=%d stride=%d comp=%d type=0x%X flag=0x%02X idxStruct=%p idxData=%p idxType=0x%X colorBuf=%p%s%s\n",
         static_cast<unsigned long>(now),
         static_cast<long>(count),
         callerReturnAddress,
@@ -973,7 +1235,9 @@ void LogImageMarkerProbeMatch(
         state->idxStruct,
         idxData,
         idxType,
-        state->colorBuf);
+        state->colorBuf,
+        uvBest,
+        uvCandidates);
     AppendImageMarkerProbeLogLine(line);
 }
 
