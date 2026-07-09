@@ -49,8 +49,9 @@ extern "C" __declspec(dllexport) HRESULT WINAPI DirectInput8Create(HINSTANCE hin
 // 2. BLUESTACKS FIX (CUSTOM MATCHER)
 // ========================================================================
 struct IndexStruct {
-    void* pad[2];
-    uint32_t type;
+    void* data;          // +0x00
+    uint8_t pad[12];     // +0x08
+    uint32_t type;       // +0x14
 };
 
 struct ImgdState {
@@ -143,7 +144,7 @@ uint8_t CustomMatcherImpl(ImgdState* state, int mode, short* outIdx, int p4, uin
     void* idxData = nullptr;
     uint32_t idxType = 0;
     if (state->idxStruct) {
-        idxData = *(void**)state->idxStruct;
+        idxData = state->idxStruct->data;
         idxType = state->idxStruct->type;
     }
 
@@ -240,8 +241,8 @@ uint8_t CustomMatcher(ImgdState* state, int mode, short* outIdx, int p4, uint32_
 // ========================================================================
 // 3. BRAWL STARS MOBASKILL AIM COMPENSATION
 // ========================================================================
-constexpr uintptr_t kMOBASkillComputeAimCoordsRva = 0x3C5690;
-constexpr uintptr_t kBlueStacksApplyCursorRva = 0xF71E0;
+constexpr uintptr_t kMOBASkillComputeAimCoordsRva = 0x3D7D70;
+constexpr uintptr_t kBlueStacksApplyCursorRva = 0xF86D0;
 constexpr double kMOBASkillScreenPercentMax = 100.0;
 double gMOBASkillEdgeThresholdPercent = 25.0;
 double gMOBASkillMaxAimXBiasPercent = 1.5;
@@ -278,6 +279,58 @@ enum BlueStacksCursorRole {
 };
 
 HMODULE gWrapperModuleHandle = nullptr;
+constexpr bool kStartupDiagnosticsEnabled = false;
+
+void AppendStartupLogLine(const char* message) {
+    if (!kStartupDiagnosticsEnabled) return;
+    if (!message || message[0] == '\0') return;
+
+    char path[MAX_PATH] = {};
+    DWORD pathLength = GetTempPathA(MAX_PATH, path);
+    if (pathLength == 0 || pathLength >= MAX_PATH) return;
+    if (strcat_s(path, "bluestacks-dinput8-wrapper.log") != 0) return;
+
+    HANDLE file = CreateFileA(
+        path,
+        FILE_APPEND_DATA,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+        nullptr,
+        OPEN_ALWAYS,
+        FILE_ATTRIBUTE_NORMAL,
+        nullptr);
+    if (file == INVALID_HANDLE_VALUE) return;
+
+    SYSTEMTIME now = {};
+    GetLocalTime(&now);
+
+    char line[1536] = {};
+    int count = sprintf_s(
+        line,
+        "%04u-%02u-%02u %02u:%02u:%02u.%03u pid=%lu tid=%lu %s",
+        now.wYear,
+        now.wMonth,
+        now.wDay,
+        now.wHour,
+        now.wMinute,
+        now.wSecond,
+        now.wMilliseconds,
+        GetCurrentProcessId(),
+        GetCurrentThreadId(),
+        message);
+
+    if (count > 0) {
+        size_t used = strnlen_s(line, sizeof(line));
+        if (used == 0 || line[used - 1] != '\n') {
+            strcat_s(line, "\r\n");
+            used = strnlen_s(line, sizeof(line));
+        }
+
+        DWORD written = 0;
+        WriteFile(file, line, static_cast<DWORD>(used), &written, nullptr);
+    }
+
+    CloseHandle(file);
+}
 
 double ClampDouble(double value, double minValue, double maxValue) {
     if (value < minValue) return minValue;
@@ -295,6 +348,7 @@ void DebugPrint(const char* format, ...) {
     if (gDebugConsoleAttached) {
         printf("%s", buf);
     }
+    AppendStartupLogLine(buf);
     OutputDebugStringA(buf);
 }
 
@@ -670,18 +724,18 @@ bool IsRvaInsideModule(HMODULE hMod, uintptr_t rva) {
 // ========================================================================
 // 4. LIVE KMM CFG RELOAD
 // ========================================================================
-constexpr uintptr_t kKmmSetSchemeByNameRva = 0x4029D0;
-constexpr uintptr_t kKmmLoadPackageCfgRva = 0x3FB360;
-constexpr uintptr_t kKmmSetActiveCfgRva = 0x402610;
-constexpr uintptr_t kKmmDestroyCfgRva = 0x3F3CC0;
-constexpr uintptr_t kQtInvokeQVariantMethodRva = 0x32950;
-constexpr uintptr_t kQStringDtorThunkRva = 0xCDFAAC;
-constexpr uintptr_t kQStringFromStdStringThunkRva = 0xCDFAC4;
-constexpr uintptr_t kQVariantDtorThunkRva = 0xCDFC08;
-constexpr uintptr_t kQVariantFromQStringThunkRva = 0xCDFC1A;
-constexpr uintptr_t kQVariantMetaTypeInterfaceRva = 0x1A0D2E0;
-constexpr uintptr_t kKmmGlobalStatePtrRva = 0x1A719B0;
+constexpr uintptr_t kKmmSetSchemeByNameRva = 0x415260;
+constexpr uintptr_t kKmmLoadPackageCfgRva = 0x40DBF0;
+constexpr uintptr_t kKmmSetActiveCfgRva = 0x414EA0;
+constexpr uintptr_t kKmmDestroyCfgRva = 0x406550;
+constexpr uintptr_t kQtInvokeQVariantMethodRva = 0x33660;
+constexpr uintptr_t kQVariantMetaTypeInterfaceRva = 0x1A312E0;
+constexpr uintptr_t kKmmGlobalStatePtrRva = 0x1A96260;
 constexpr const char* kBrawlStarsPackageName = "com.supercell.brawlstars";
+constexpr const char* kQStringDtorSymbol = "??1QString@@QEAA@XZ";
+constexpr const char* kQStringFromStdStringSymbol = "?fromStdString@QString@@SA?AV1@AEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@Z";
+constexpr const char* kQVariantDtorSymbol = "??1QVariant@@QEAA@XZ";
+constexpr const char* kQVariantFromQStringSymbol = "??0QVariant@@QEAA@AEBVQString@@@Z";
 using KmmSetSchemeByNameFn = unsigned int (*)(const std::string*);
 using KmmLoadPackageCfgFn = void* (*)(void*, const std::string*);
 using KmmSetActiveCfgFn = __int64 (*)(void*, char);
@@ -697,6 +751,14 @@ struct QtQVariantInvokeArg {
     const char* typeName;
     void* value;
 };
+
+FARPROC ResolveQtCoreExport(const char* procName) {
+    HMODULE qtCoreModule = GetModuleHandleA("Qt6Core.dll");
+    if (!qtCoreModule) {
+        qtCoreModule = GetModuleHandleA("Qt5Core.dll");
+    }
+    return qtCoreModule ? GetProcAddress(qtCoreModule, procName) : nullptr;
+}
 
 bool GetFileWriteTime(const std::string& path, FILETIME* writeTime) {
     WIN32_FILE_ATTRIBUTE_DATA data = {};
@@ -1694,7 +1756,7 @@ bool ShowSchemeChangedToastUnsafe(HMODULE hdPlayerModule, const std::string& sch
 
     uintptr_t kmmState = *reinterpret_cast<uintptr_t*>(globalStatePtrAddress);
     if (!kmmState) {
-        DebugPrint("KMM live reload: qword_141A719B0 is null; toast skipped\n");
+        DebugPrint("KMM live reload: qword_141A96260 is null; toast skipped\n");
         return false;
     }
 
@@ -1704,11 +1766,33 @@ bool ShowSchemeChangedToastUnsafe(HMODULE hdPlayerModule, const std::string& sch
         return false;
     }
 
-    auto qStringFromStdString = reinterpret_cast<QStringFromStdStringFn>(base + kQStringFromStdStringThunkRva);
-    auto qStringDtor = reinterpret_cast<QStringDtorFn>(base + kQStringDtorThunkRva);
-    auto qVariantFromQString = reinterpret_cast<QVariantFromQStringFn>(base + kQVariantFromQStringThunkRva);
-    auto qVariantDtor = reinterpret_cast<QVariantDtorFn>(base + kQVariantDtorThunkRva);
-    auto invokeMethod = reinterpret_cast<QtInvokeQVariantMethodFn>(base + kQtInvokeQVariantMethodRva);
+    std::vector<int> qtInvokeQVariantMethodSig = {
+        0x4c, 0x8b, 0xdc, 0x48, 0x81, 0xec, 0xa8, 0x00, 0x00, 0x00,
+        0x41, 0x0f, 0x10, 0x00, 0x33, 0xc0, 0x41, 0xb9, 0x02, 0x00,
+        0x00, 0x00, 0xf2, 0x41, 0x0f, 0x10, 0x48, 0x10
+    };
+    uintptr_t invokeMethodAddr = ResolveFunction(
+        hdPlayerModule,
+        qtInvokeQVariantMethodSig,
+        kQtInvokeQVariantMethodRva);
+    if (!invokeMethodAddr) {
+        DebugPrint("KMM live reload: Qt QVariant invoke helper signature resolution failed; toast skipped\n");
+        return false;
+    }
+
+    auto qStringFromStdString = reinterpret_cast<QStringFromStdStringFn>(
+        ResolveQtCoreExport(kQStringFromStdStringSymbol));
+    auto qStringDtor = reinterpret_cast<QStringDtorFn>(
+        ResolveQtCoreExport(kQStringDtorSymbol));
+    auto qVariantFromQString = reinterpret_cast<QVariantFromQStringFn>(
+        ResolveQtCoreExport(kQVariantFromQStringSymbol));
+    auto qVariantDtor = reinterpret_cast<QVariantDtorFn>(
+        ResolveQtCoreExport(kQVariantDtorSymbol));
+    auto invokeMethod = reinterpret_cast<QtInvokeQVariantMethodFn>(invokeMethodAddr);
+    if (!qStringFromStdString || !qStringDtor || !qVariantFromQString || !qVariantDtor) {
+        DebugPrint("KMM live reload: QtCore QString/QVariant exports could not be resolved; toast skipped\n");
+        return false;
+    }
 
     alignas(16) unsigned char qStringStorage[64] = {};
     alignas(16) unsigned char qVariantStorage[64] = {};
@@ -1947,6 +2031,10 @@ bool LoadWrapperSettings(const std::string& cfgPath) {
         return LoadWrapperSettingsFromFile(wrapperPath);
     }
 
+    DebugPrint(
+        "Wrapper settings: %s was not found; falling back to %s\n",
+        wrapperPath.c_str(),
+        cfgPath.c_str());
     return LoadWrapperSettingsFromFile(cfgPath);
 }
 
@@ -1999,10 +2087,6 @@ bool ReloadPackageCfg(HMODULE hdPlayerModule, const std::string& cfgPath, const 
         !IsRvaInsideModule(hdPlayerModule, kKmmDestroyCfgRva) ||
         !IsRvaInsideModule(hdPlayerModule, kKmmSetSchemeByNameRva) ||
         !IsRvaInsideModule(hdPlayerModule, kQtInvokeQVariantMethodRva) ||
-        !IsRvaInsideModule(hdPlayerModule, kQStringDtorThunkRva) ||
-        !IsRvaInsideModule(hdPlayerModule, kQStringFromStdStringThunkRva) ||
-        !IsRvaInsideModule(hdPlayerModule, kQVariantDtorThunkRva) ||
-        !IsRvaInsideModule(hdPlayerModule, kQVariantFromQStringThunkRva) ||
         !IsRvaInsideModule(hdPlayerModule, kQVariantMetaTypeInterfaceRva) ||
         !IsRvaInsideModule(hdPlayerModule, kKmmGlobalStatePtrRva)) {
         ReportHookResolutionError("KMM live cfg apply", "One or more KMM reload or SetScheme/toast RVAs are outside the HD-Player image.");
@@ -2017,8 +2101,8 @@ bool ReloadPackageCfg(HMODULE hdPlayerModule, const std::string& cfgPath, const 
     std::vector<int> setSchemeByNameSig = {
         0x48, 0x89, 0x5c, 0x24, 0x18, 0x55, 0x57, 0x41, 0x56, 0x48,
         0x83, 0xec, 0x40, 0x48, 0x8b, 0xd1, 0x48, 0x8d, 0x4c, 0x24,
-        0x20, 0xff, 0x15, 0x35, 0x22, 0xa3, 0x00, 0x48, 0x8b, 0x3d,
-        0xbe, 0xef, 0x66, 0x01
+        0x20, 0xff, 0x15, -1, -1, -1, -1, 0x48, 0x8b, 0x3d,
+        -1, -1, -1, -1
     };
     std::vector<int> loadPackageCfgSig = {
         0x48, 0x89, 0x5c, 0x24, -1, 0x48, 0x89, 0x74, 0x24, -1,
@@ -2033,7 +2117,11 @@ bool ReloadPackageCfg(HMODULE hdPlayerModule, const std::string& cfgPath, const 
     };
     std::vector<int> destroyCfgSig = {
         0x40, 0x57, 0x48, 0x83, 0xec, 0x20, 0x48, 0x8b, 0x91,
-        -1, -1, -1, -1, 0x48, 0x8b, 0xf9, 0x48, 0x83, 0xfa, 0x10
+        0xd8, 0x00, 0x00, 0x00, 0x48, 0x8b, 0xf9, 0x48, 0x83,
+        0xfa, 0x10, 0x72, -1, 0x48, 0x8b, 0x89, 0xc0, 0x00,
+        0x00, 0x00, 0x48, 0xff, 0xc2, 0x48, 0x81, 0xfa, 0x00,
+        0x10, 0x00, 0x00, 0x72, -1, 0x4c, 0x8b, 0x41, 0xf8,
+        0x48, 0x83, 0xc2, 0x27, 0x49, 0x2b, 0xc8
     };
 
     uintptr_t loadPackageCfgAddr = ResolveFunction(hdPlayerModule, loadPackageCfgSig, kKmmLoadPackageCfgRva);
@@ -2132,6 +2220,7 @@ void LogHookError(const char* step, MH_STATUS status) {
 }
 
 DWORD WINAPI MainThread(LPVOID lpReserved) {
+    AppendStartupLogLine("MainThread entered");
     LoadWrapperSettings(GetBrawlStarsLiveCfgPath());
     DebugPrint("Config: save from cfg editor to reload Brawl Stars cfg from BlueStacks user file\n");
     DebugPrint("Initial debugConsole %d, MOBASkill compensation strength %.2f, edge threshold %.2f\n",
@@ -2203,10 +2292,9 @@ DWORD WINAPI MainThread(LPVOID lpReserved) {
         };
         uintptr_t applyCursorFunc = FindPattern(hMod, applyCursorSig);
         if (!applyCursorFunc) {
-            applyCursorFunc = ModuleAddressFromRva(hMod, kBlueStacksApplyCursorRva);
             DebugPrint(
-                "Custom cursor: applyCursor signature failed; fallback RVA resolved to 0x%p\n",
-                reinterpret_cast<void*>(applyCursorFunc));
+                "Custom cursor: applyCursor signature failed; fallback RVA 0x%p disabled\n",
+                reinterpret_cast<void*>(kBlueStacksApplyCursorRva));
         }
         if (!applyCursorFunc) {
             ReportHookResolutionError("Custom cursor role detection", "BlueStacks cursor applicator could not be resolved.");
@@ -2222,27 +2310,23 @@ DWORD WINAPI MainThread(LPVOID lpReserved) {
             }
         }
 
-        if (IsRvaInsideModule(hMod, kMOBASkillComputeAimCoordsRva)) {
-            std::vector<int> aimSig = {
-                0x48, 0x8b, 0xc4, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57,
-                0x48, 0x8d, 0xa8, -1, -1, -1, -1, 0x48, 0x81, 0xec, 0xa8, 0x01, 0x00, 0x00
-            };
-            uintptr_t aimFunc = ResolveFunction(hMod, aimSig, kMOBASkillComputeAimCoordsRva);
-            if (!aimFunc) {
-                ReportHookResolutionError("ImapRtMOBASkill_computeAimCoords", "Signature and fallback RVA resolution both failed.");
-            } else {
-                status = MH_CreateHook(
-                    reinterpret_cast<void*>(aimFunc),
-                    &CustomMOBASkillComputeAimCoords,
-                    reinterpret_cast<void**>(&pOriginalMOBASkillComputeAimCoords));
-                if (status != MH_OK) {
-                    LogHookError("MH_CreateHook CustomMOBASkillComputeAimCoords", status);
-                } else {
-                    DebugPrint("MOBASkill aim hook created at 0x%p\n", reinterpret_cast<void*>(aimFunc));
-                }
-            }
+        std::vector<int> aimSig = {
+            0x48, 0x8b, 0xc4, 0x55, 0x53, 0x56, 0x57, 0x41, 0x54, 0x41, 0x55, 0x41, 0x56, 0x41, 0x57,
+            0x48, 0x8d, 0xa8, -1, -1, -1, -1, 0x48, 0x81, 0xec, 0xa8, 0x01, 0x00, 0x00
+        };
+        uintptr_t aimFunc = ResolveFunction(hMod, aimSig, kMOBASkillComputeAimCoordsRva);
+        if (!aimFunc) {
+            ReportHookResolutionError("ImapRtMOBASkill_computeAimCoords", "Signature resolution failed.");
         } else {
-            ReportHookResolutionError("ImapRtMOBASkill_computeAimCoords", "Fallback RVA is outside the HD-Player image.");
+            status = MH_CreateHook(
+                reinterpret_cast<void*>(aimFunc),
+                &CustomMOBASkillComputeAimCoords,
+                reinterpret_cast<void**>(&pOriginalMOBASkillComputeAimCoords));
+            if (status != MH_OK) {
+                LogHookError("MH_CreateHook CustomMOBASkillComputeAimCoords", status);
+            } else {
+                DebugPrint("MOBASkill aim hook created at 0x%p\n", reinterpret_cast<void*>(aimFunc));
+            }
         }
 
         status = MH_EnableHook(MH_ALL_HOOKS);
@@ -2257,6 +2341,7 @@ DWORD WINAPI MainThread(LPVOID lpReserved) {
 
 BOOL APIENTRY DllMain(HMODULE hModule, DWORD ul_reason_for_call, LPVOID lpReserved) {
     if (ul_reason_for_call == DLL_PROCESS_ATTACH) {
+        AppendStartupLogLine("DLL_PROCESS_ATTACH");
         gWrapperModuleHandle = hModule;
         InitializeCriticalSection(&gDesiredCfgLock);
         gDesiredCfgLockInitialized = true;

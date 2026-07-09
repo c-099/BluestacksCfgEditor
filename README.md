@@ -30,8 +30,10 @@ A Windows desktop editor for BlueStacks 5 `.cfg` game-control mapping files.
 Extract the release anywhere and keep the application files together:
 
 ```text
-<release folder>\BluestacksCfgEditor.exe
-<release folder>\dinput8.dll
+<release folder>\app\BluestacksCfgEditor.exe
+<release folder>\app\dinput8.dll
+<release folder>\app\install-wrapper.bat
+<release folder>\app\uninstall-wrapper.bat
 ```
 
 On startup, the editor creates the wrapper settings file under the BlueStacks
@@ -48,9 +50,13 @@ live functionality:
 <BlueStacks install directory>\dinput8.dll
 ```
 
-Run `install-wrapper.bat` from the release folder to install or update the
-wrapper. Run `uninstall-wrapper.bat` to remove it. The editor only warns when
+Run `install-wrapper.bat` from the release `app` folder to install or update the
+wrapper. Run `uninstall-wrapper.bat` from the same folder to remove it. The editor only warns when
 the wrapper is missing or does not match the bundled wrapper.
+
+Release zips may also include a `custom-cursors` folder. Those files are copied
+from the cursor paths in the current wrapper settings, with the original setting
+names recorded in `custom-cursors/cursor-manifest.json`.
 
 The release zip also includes my personal Brawl Stars control config:
 

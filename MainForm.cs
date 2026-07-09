@@ -376,7 +376,9 @@ internal sealed class MainForm : Form
             return;
         }
 
-        SetStatus("Live config editing enabled; installed wrapper does not match the bundled wrapper.");
+        SetStatus(
+            "Live config editing enabled; installed wrapper is stale. " +
+            $"Run install-wrapper.bat as administrator to copy {sourceWrapperPath} to {installedWrapperPath}.");
     }
 
     private void DisableLiveFunctionality(string status)

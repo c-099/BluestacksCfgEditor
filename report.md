@@ -1,5 +1,124 @@
 # BlueStacks HD-Player Offset Update Report
 
+## 2026-07-09 v0.9.6 Release Packaging
+
+- Bumped `BluestacksCfgEditor` from `0.9.5` to `0.9.6`.
+- Left the startup diagnostic code in the wrapper, but disabled it by default with `kStartupDiagnosticsEnabled = false`.
+- Updated the release script to package custom cursor files referenced by the current live wrapper config.
+- Packaged cursor assets:
+  - `custom-cursors/Thick Green V2 Precision.cur` for `gCustomCursorMobaPath`
+  - `custom-cursors/Thick Green V2 Default.cur` for `gCustomCursorMobaRightPath`
+  - `custom-cursors/cursor-manifest.json`
+- Created release zip:
+  - `artifacts/release/BluestacksCfgEditor-v0.9.6-win-x64.zip`
+  - Size: `47344162` bytes
+  - SHA-256: `B880BB0751D9FCE19BDEE9BA10D9F4F53B3E6CF7972105EF809250FE29851DEF`
+- Rebuilt wrapper included in the zip:
+  - Size: `125952` bytes
+  - SHA-256: `781B9320A156419AB427CED86043DA738AE2C4A7F5366DA71DAEAB7DDB018172`
+- Release build result: wrapper and editor publish completed with 0 warnings and 0 errors.
+
+## 2026-07-09 BlueStacks Update Pass
+
+### Binary Analyzed
+
+- Input: `C:\Program Files\BlueStacks_nxt\HD-Player.exe`
+- IDB: `C:\Users\User\Documents\7.9.2026.HD-Player.exe.i64`
+- Image base: `0x140000000`
+- SHA-256: `684F2FB2EA381545D0F570D5BFCB3F1595D576A89E6A62DA8416EA5518B4D418`
+
+### IDA Work Performed
+
+- Decompilation confirmed the old June RVAs now land in unrelated functions.
+- Renamed current wrapper targets:
+  - `Imgd_FindColorMarkerTriangle` at `0x140372630`
+  - `BlueStacksApplyCursorStyle` at `0x1400F86D0`
+  - `ImapRtMOBASkill_computeAimCoords` at `0x1403D7D70`
+  - `Kmm_loadPackageCfgForPackage` at `0x14040DBF0`
+  - `Kmm_destroyCfg` at `0x140406550`
+  - `Kmm_setActiveCfg` at `0x140414EA0`
+  - `Kmm_setSchemeByName` at `0x140415260`
+  - `Qt_invokeQObjectMethodWithQVariantArgs` at `0x140033660`
+  - `Kmm_switchSchemeHotkeyAction` at `0x140416930`
+- Renamed globals:
+  - `g_kmm_state` at `0x141A96260`
+  - `g_QVariant_metaTypeInterface` at `0x141A312E0`
+  - `g_imap_runtime_state` at `0x141A95FF8`
+- Applied prototypes to the compact wrapper targets and renamed key arguments/locals, including `state`, `outIdx`, `markerColor`, `indexData`, `indexType`, `skillRuntime`, `outAimX`, `outAimY`, `cfgOut`, `packageNameStdString`, `cfg`, `applyNow`, `qmlObject`, `methodName`, and `argDescriptor`.
+- Added IDA comments at the matcher guard/index-type read/color read, each KMM wrapper target, the unique cfg destructor, and the Qt toast helper path.
+- Used the IDA `int_convert` MCP tool for address/RVA conversion checks; no manual number-base conversion was used.
+
+### Current Wrapper Targets
+
+| Wrapper target | Current RVA | IDA name | Signature status |
+|---|---:|---|---|
+| Imgd color matcher | `0x372630` | `Imgd_FindColorMarkerTriangle` | Unique |
+| BlueStacks cursor style applicator | `0xF86D0` | `BlueStacksApplyCursorStyle` | Unique |
+| MOBASkill aim compute | `0x3D7D70` | `ImapRtMOBASkill_computeAimCoords` | Unique |
+| KMM load package cfg | `0x40DBF0` | `Kmm_loadPackageCfgForPackage` | Unique |
+| KMM destroy cfg | `0x406550` | `Kmm_destroyCfg` | Unique with strengthened signature |
+| KMM set active cfg | `0x414EA0` | `Kmm_setActiveCfg` | Unique |
+| KMM set scheme by name | `0x415260` | `Kmm_setSchemeByName` | Unique with RIP displacements wildcarded |
+| Qt/QML QVariant invoke helper | `0x33660` | `Qt_invokeQObjectMethodWithQVariantArgs` | Unique |
+| KMM global state pointer | `0x1A96260` | `g_kmm_state` | Data RVA |
+| QVariant metatype interface | `0x1A312E0` | `g_QVariant_metaTypeInterface` | Data RVA |
+
+### Findings
+
+- The `ImgdState` fields used by the wrapper are still at the same offsets: index stream pointer at `+0x00`, color buffer at `+0x08`, stride at `+0x1C`, component count at `+0x20`, GL type at `+0x24`, flag at `+0x2A`, cursor at `+0x2C`, and max vertices at `+0x30`.
+- The indexed draw stream layout changed. The index data pointer is still at `idxStruct + 0x00`, but the GL index type is now read at `idxStruct + 0x14`, not the old wrapper's `+0x10`.
+- The matcher prologue signature still resolves uniquely in the new binary, but the wrapper data layout needed the `IndexStruct` fix above.
+- The short `Kmm_destroyCfg` signature was non-unique in this build. It has been replaced with a longer signature anchored on the cfg string cleanup sequence using offsets `+0xD8` and `+0xC0`.
+- `Kmm_setSchemeByName` still has a stable prologue, but the old signature baked in RIP-relative import/global displacements. Those bytes are now wildcarded.
+- The toast path now uses `g_kmm_state` at `0x141A96260`, `g_QVariant_metaTypeInterface` at `0x141A312E0`, and `Qt_invokeQObjectMethodWithQVariantArgs` at `0x140033660`.
+- The Qt QString/QVariant constructor/destructor offsets should not be hardcoded. The current binary imports them from `Qt6Core.dll`, so the wrapper now resolves those functions by export name at runtime, with a `Qt5Core.dll` fallback.
+
+### Source Changes
+
+Updated:
+
+- `BluestacksCfgEditor/BlueStacksDInputWrapper/main.cpp`
+
+Main changes:
+
+- Updated stale RVAs for matcher-related hooks, cursor role detection, MOBASkill aim, KMM reload, KMM scheme switching, KMM globals, and the Qt/QML invoke helper.
+- Fixed `IndexStruct` so `type` is read at `+0x14`.
+- Added runtime QtCore export resolution for `QString::fromStdString`, `QString::~QString`, `QVariant::QVariant(QString const&)`, and `QVariant::~QVariant`.
+- Added signature resolution for the Qt/QML QVariant invoke helper.
+- Wildcarded `Kmm_setSchemeByName` RIP-relative operands.
+- Replaced the non-unique `Kmm_destroyCfg` signature with a longer unique one.
+- Disabled stale RVA fallback for the cursor style hook and simplified MOBASkill resolution to fail closed on signature miss.
+- Added a startup diagnostic log at `%TEMP%\bluestacks-dinput8-wrapper.log` so wrapper load and hook installation can be verified without enabling the debug console.
+- Updated the editor stale-wrapper status message to identify the bundled DLL and installed BlueStacks DLL paths.
+
+### Verification
+
+- Signature uniqueness against the current `HD-Player.exe`:
+  - Matcher: `0x372630`, count `1`
+  - Cursor style applicator: `0xF86D0`, count `1`
+  - MOBASkill aim compute: `0x3D7D70`, count `1`
+  - KMM load package cfg: `0x40DBF0`, count `1`
+  - KMM destroy cfg: `0x406550`, count `1`
+  - KMM set active cfg: `0x414EA0`, count `1`
+  - KMM set scheme by name: `0x415260`, count `1`
+  - Qt/QML invoke helper: `0x33660`, count `1`
+- Native wrapper build:
+  - Project: `BlueStacksDInputWrapper/BlueStacksDInputWrapper.vcxproj`
+  - Configuration: `Release`
+  - Platform: `x64`
+  - Result: 0 warnings, 0 errors
+  - Output: `BlueStacksDInputWrapper/x64/Release/dinput8.dll`
+  - Size: `126464` bytes
+  - SHA-256: `643EFAE7E6EBA517ABEBA8F0A337BD49E582B0AA36E9FE196D6BF17A5DC1F1F7`
+- Editor build:
+  - Configuration: `Release`
+  - Result: 0 warnings, 0 errors
+- Deployment/load verification:
+  - The live `C:\Program Files\BlueStacks_nxt\dinput8.dll` was stale after the first build, so BlueStacks was not loading the rebuilt wrapper.
+  - The non-elevated copy into `C:\Program Files\BlueStacks_nxt` failed with access denied.
+  - After the elevated install copy, the installed DLL hash matched the bundled wrapper: `643EFAE7E6EBA517ABEBA8F0A337BD49E582B0AA36E9FE196D6BF17A5DC1F1F7`.
+  - `%TEMP%\bluestacks-dinput8-wrapper.log` confirmed `DLL_PROCESS_ATTACH`, `CustomMatcher hook created`, `Custom cursor role hook created`, `MOBASkill aim hook created`, and `All hooks enabled` in the live `HD-Player.exe` process.
+
 Date: 2026-06-26
 
 ## Binary Analyzed
