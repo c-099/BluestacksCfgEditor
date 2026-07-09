@@ -25,34 +25,6 @@ A Windows desktop editor for BlueStacks 5 `.cfg` game-control mapping files.
 - [.NET 10 SDK](https://dotnet.microsoft.com/download/dotnet/10.0) to build from source
 - BlueStacks 5 for live configuration discovery and saving
 
-## Build and run
-
-Clone the repository, then run:
-
-```powershell
-dotnet run --project BluestacksCfgEditor.csproj
-```
-
-To create a release build:
-
-```powershell
-dotnet publish BluestacksCfgEditor.slnx --configuration Release
-```
-
-The release output is written to `bin/Release/net10.0-windows/win-x64/publish/` and produces a self-contained single-file executable.
-
-To build the native wrapper, publish the editor, and create a GitHub release zip:
-
-```powershell
-.\scripts\package-release.ps1
-```
-
-The release zip is written to:
-
-```text
-artifacts\release\BluestacksCfgEditor-v<version>-win-x64.zip
-```
-
 ## Usage
 
 Extract the release anywhere and keep the application files together:
@@ -130,6 +102,34 @@ Wrapper settings use the same rolling backup pattern:
 
 ```text
 dinput8-config.json.bak
+```
+
+## How to build
+
+Clone the repository, then run:
+
+```powershell
+dotnet run --project BluestacksCfgEditor.csproj
+```
+
+To create a release build:
+
+```powershell
+dotnet publish BluestacksCfgEditor.slnx --configuration Release
+```
+
+The release output is written to `bin/Release/net10.0-windows/win-x64/publish/` and produces a self-contained single-file executable.
+
+To build the native wrapper, publish the editor, and create a GitHub release zip:
+
+```powershell
+.\scripts\package-release.ps1
+```
+
+The release zip is written to:
+
+```text
+artifacts\release\BluestacksCfgEditor-v<version>-win-x64.zip
 ```
 
 ## Wrapper
