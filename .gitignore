@@ -45,6 +45,7 @@ packages/
 publish/
 
 # Logs and temporary files
+report.md
 *.log
 *.tmp
 *.bak
