@@ -241,8 +241,11 @@ uint8_t CustomMatcher(ImgdState* state, int mode, short* outIdx, int p4, uint32_
 // ========================================================================
 // 3. BRAWL STARS MOBASKILL AIM COMPENSATION
 // ========================================================================
-constexpr uintptr_t kMOBASkillComputeAimCoordsRva = 0x3D7D70;
-constexpr uintptr_t kBlueStacksApplyCursorRva = 0xF86D0;
+// BlueStacks 9.1.2026 (HD-Player.exe, imagebase 0x140000000):
+//   ImapRtMOBASkill_computeAimCoords = VA 0x140403C20
+//   BlueStacksApplyCursorStyle       = VA 0x140101B10
+constexpr uintptr_t kMOBASkillComputeAimCoordsRva = 0x403C20;
+constexpr uintptr_t kBlueStacksApplyCursorRva = 0x101B10;
 constexpr double kMOBASkillScreenPercentMax = 100.0;
 double gMOBASkillEdgeThresholdPercent = 25.0;
 double gMOBASkillMaxAimXBiasPercent = 1.5;
@@ -724,13 +727,21 @@ bool IsRvaInsideModule(HMODULE hMod, uintptr_t rva) {
 // ========================================================================
 // 4. LIVE KMM CFG RELOAD
 // ========================================================================
-constexpr uintptr_t kKmmSetSchemeByNameRva = 0x415260;
-constexpr uintptr_t kKmmLoadPackageCfgRva = 0x40DBF0;
-constexpr uintptr_t kKmmSetActiveCfgRva = 0x414EA0;
-constexpr uintptr_t kKmmDestroyCfgRva = 0x406550;
-constexpr uintptr_t kQtInvokeQVariantMethodRva = 0x33660;
-constexpr uintptr_t kQVariantMetaTypeInterfaceRva = 0x1A312E0;
-constexpr uintptr_t kKmmGlobalStatePtrRva = 0x1A96260;
+// BlueStacks 9.1.2026 (HD-Player.exe, imagebase 0x140000000):
+//   Kmm_setSchemeByName                  = VA 0x140441070
+//   Kmm_loadPackageCfgForPackage         = VA 0x140439A00
+//   Kmm_setActiveCfg                     = VA 0x140440CB0
+//   Kmm_destroyCfg                       = VA 0x140432360
+//   Qt_invokeQObjectMethodWithQVariantArgs = VA 0x1400339B0
+//   g_QVariant_metaTypeInterface (.data) = VA 0x141E402E0
+//   g_kmm_state (.data)                  = VA 0x141EA7910
+constexpr uintptr_t kKmmSetSchemeByNameRva = 0x441070;
+constexpr uintptr_t kKmmLoadPackageCfgRva = 0x439A00;
+constexpr uintptr_t kKmmSetActiveCfgRva = 0x440CB0;
+constexpr uintptr_t kKmmDestroyCfgRva = 0x432360;
+constexpr uintptr_t kQtInvokeQVariantMethodRva = 0x339B0;
+constexpr uintptr_t kQVariantMetaTypeInterfaceRva = 0x1E402E0;
+constexpr uintptr_t kKmmGlobalStatePtrRva = 0x1EA7910;
 constexpr const char* kBrawlStarsPackageName = "com.supercell.brawlstars";
 constexpr const char* kQStringDtorSymbol = "??1QString@@QEAA@XZ";
 constexpr const char* kQStringFromStdStringSymbol = "?fromStdString@QString@@SA?AV1@AEBV?$basic_string@DU?$char_traits@D@std@@V?$allocator@D@2@@std@@@Z";
@@ -1756,7 +1767,7 @@ bool ShowSchemeChangedToastUnsafe(HMODULE hdPlayerModule, const std::string& sch
 
     uintptr_t kmmState = *reinterpret_cast<uintptr_t*>(globalStatePtrAddress);
     if (!kmmState) {
-        DebugPrint("KMM live reload: qword_141A96260 is null; toast skipped\n");
+        DebugPrint("KMM live reload: g_kmm_state (qword_141EA7910) is null; toast skipped\n");
         return false;
     }
 
@@ -2229,6 +2240,10 @@ DWORD WINAPI MainThread(LPVOID lpReserved) {
         gMOBASkillEdgeThresholdPercent);
 
     // Signature for BlueStacks Matcher Prologue
+    // BlueStacks 9.1.2026: Imgd_FindColorMarkerTriangle = VA 0x14039E4E0 (RVA 0x39E4E0).
+    // ImgdState layout re-verified for 9.1.2026: indexStream+0x00, colorBuffer+0x08,
+    // colorStride+0x1C, componentCount+0x20, componentType+0x24, markerDisabled+0x2A,
+    // indexCursor+0x2C, vertexCount+0x30; IndexStream.data+0x00, IndexStream.glIndexType+0x14.
     std::vector<int> sig = { 0x48, 0x89, 0x5c, 0x24, 0x08, 0x48, 0x89, 0x6c, 0x24, 0x10, 0x48, 0x89, 0x74, 0x24, 0x18, 0x57, 0x41, 0x56, 0x41, 0x57, 0x48, 0x83, 0xec, 0x20, 0x80, 0x79, 0x2a, 0x00 };
 
     HMODULE hMod = nullptr;
